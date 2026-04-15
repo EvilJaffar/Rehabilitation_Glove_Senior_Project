@@ -27,7 +27,7 @@ static const unsigned char ADS7830_CMD[8] = {
 // EMG command logic works with a real (non-floating) sensor signal.
 #define EMG_CHANNEL         5
 #define EMG_CLOSE_DELTA     12    // close when filtered > baseline + delta
-#define EMG_OPEN_DELTA      8     // open  when filtered < baseline + delta
+#define EMG_OPEN_DELTA      8     // open  when filtered < baseline - delta
 #define EMG_FILTER_SHIFT    2     // 1/(2^n)=1/4 IIR smoothing
 #define EMG_CONFIRM_SAMPLES 3     // require N consecutive samples
 
@@ -57,13 +57,15 @@ static int emg_baseline = 128;
 // ===== USER INTERFACE GPIO =====
 #define SWITCH_OPEN_PIN         10  // Open the user's hand (Manual Mode only)
 #define SWITCH_CLOSE_PIN        11  // Close the user's hand (Manual Mode only)
-#define EMG_CALIBRATE_PIN       8  // Calibrate EMG baseline
+#define EMG_CALIBRATE_PIN       8   // Calibrate EMG baseline
 #define ROTARY_ENCODER_A_PIN    13  // Rotary switch for speed adjustment (not implemented yet)
 #define ROTARY_ENCODER_B_PIN    14  // Rotary switch for speed adjustment (not implemented yet)
 #define GLOVE_START_PIN         15  // Start the glove operation
 #define GLOVE_STOP_PIN          16  // Stop the glove operation
 
 #define CALIBRATE_DEBOUNCE_MS   250u
+#define CALIBRATE_DURATION_MS  10000u
+#define CALIBRATE_SAMPLE_MS       10u
 
 // ===== ADS7830 READ =====
 unsigned char ads7830_read_channel(unsigned char channel) {
@@ -101,6 +103,47 @@ static void calibrate_emg_baseline() {
     if (emg_baseline > 245) emg_baseline = 245;
 }
 
+static void calibrate_emg_baseline_timed() {
+    printf("[CAL] Starting 10s calibration. Keep hand relaxed...\n");
+
+    uint32_t start_ms = to_ms_since_boot(get_absolute_time());
+    uint32_t last_print_s = 0;
+    unsigned int sum = 0;
+    unsigned int samples = 0;
+
+    while ((to_ms_since_boot(get_absolute_time()) - start_ms) < CALIBRATE_DURATION_MS) {
+        // Keep motors disabled throughout timed calibration.
+        send_packet(MODE_OFF, EMG_HOLD, 0u);
+
+        sum += ads7830_read_channel(EMG_CHANNEL);
+        samples++;
+
+        uint32_t elapsed_ms = to_ms_since_boot(get_absolute_time()) - start_ms;
+        uint32_t elapsed_s = elapsed_ms / 1000u;
+        if (elapsed_s != last_print_s) {
+            last_print_s = elapsed_s;
+            printf("[CAL] %lus/%lus\n",
+                   (unsigned long)elapsed_s,
+                   (unsigned long)(CALIBRATE_DURATION_MS / 1000u));
+        }
+
+        sleep_ms(CALIBRATE_SAMPLE_MS);
+    }
+
+    if (samples == 0) {
+        samples = 1;
+    }
+
+    emg_baseline = (int)(sum / samples);
+    if (emg_baseline < 10) emg_baseline = 10;
+    if (emg_baseline > 245) emg_baseline = 245;
+
+    printf("[CAL] Done. New baseline=%d (close>%d open<%d)\n",
+           emg_baseline,
+           emg_baseline + EMG_CLOSE_DELTA,
+           emg_baseline - EMG_OPEN_DELTA);
+}
+
 // Reject short spikes by smoothing EMG and requiring repeated threshold hits.
 unsigned char get_emg_cmd_filtered(unsigned char* raw_out, unsigned char* filt_out) {
     static int emg_filt = 128;
@@ -111,7 +154,7 @@ unsigned char get_emg_cmd_filtered(unsigned char* raw_out, unsigned char* filt_o
     emg_filt += ((int)raw - emg_filt) >> EMG_FILTER_SHIFT;
 
     int close_thresh = emg_baseline + EMG_CLOSE_DELTA;
-    int open_thresh = emg_baseline + EMG_OPEN_DELTA;
+    int open_thresh = emg_baseline - EMG_OPEN_DELTA;
     if (close_thresh > 250) close_thresh = 250;
     if (open_thresh < 0) open_thresh = 0;
     if (open_thresh >= close_thresh) open_thresh = close_thresh - 1;
@@ -162,7 +205,7 @@ int main() {
         printf("EMG baseline=%d (close>%d open<%d)\n",
             emg_baseline,
             emg_baseline + EMG_CLOSE_DELTA,
-            emg_baseline + EMG_OPEN_DELTA);
+                emg_baseline - EMG_OPEN_DELTA);
 
     // GPIO mode inputs
     gpio_init(PIN_MODE_EMG);
@@ -211,22 +254,15 @@ int main() {
                  emg_baseline,
                    (unsigned int)emg_cmd);
 
-            // Calibrate EMG baseline if pin is pressed
-            if (mode_emg && calibrate_now && !calibrate_prev
-            && (now_ms - calibrate_last_ms) > CALIBRATE_DEBOUNCE_MS) {
-            printf("[CAL] Calibrate pin HIGH -> measuring relaxed EMG baseline...\n");
-            // Keep motors stopped while baseline is being refreshed.
-            send_packet(MODE_OFF, EMG_HOLD, 0u);
-            calibrate_emg_baseline();
-            calibrate_last_ms = now_ms;
-            printf("[CAL] New baseline=%d (close>%d open<%d)\n",
-                   emg_baseline,
-                   emg_baseline + EMG_CLOSE_DELTA,
-                   emg_baseline + EMG_OPEN_DELTA);
-            calibrate_prev = calibrate_now;
-            sleep_ms(20);
-            continue;
-             }
+            // One-shot timed calibration on rising edge in EMG mode.
+            if (calibrate_now && !calibrate_prev
+                && (now_ms - calibrate_last_ms) > CALIBRATE_DEBOUNCE_MS) {
+                calibrate_emg_baseline_timed();
+                calibrate_last_ms = to_ms_since_boot(get_absolute_time());
+                calibrate_prev = calibrate_now;
+                sleep_ms(20);
+                continue;
+            }
             calibrate_prev = calibrate_now;
 
             // FSR acts as safety stop: if contact detected, stop immediately
