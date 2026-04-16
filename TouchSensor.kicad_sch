@@ -1,0 +1,1206 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "9bfa7177-11b9-4bd8-81a2-4ed1ec1a0d52")
+	(paper "A4")
+	(title_block
+		(date "2026-01-22")
+	)
+	(lib_symbols
+		(symbol "Device:R"
+			(pin_numbers
+				(hide yes)
+			)
+			(pin_names
+				(offset 0)
+			)
+			(exclude_from_sim no)
+			(in_bom yes)
+			(on_board yes)
+			(property "Reference" "R"
+				(at 2.032 0 90)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Value" "R"
+				(at 0 0 90)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+				)
+			)
+			(property "Footprint" ""
+				(at -1.778 0 90)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Datasheet" "~"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "Description" "Resistor"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "ki_keywords" "R res resistor"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(property "ki_fp_filters" "R_*"
+				(at 0 0 0)
+				(effects
+					(font
+						(size 1.27 1.27)
+					)
+					(hide yes)
+				)
+			)
+			(symbol "R_0_1"
+				(rectangle
+					(start -1.016 -2.54)
+					(end 1.016 2.54)
+					(stroke
+						(width 0.254)
+						(type default)
+					)
+					(fill
+						(type none)
+					)
+				)
+			)
+			(symbol "R_1_1"
+				(pin passive line
+					(at 0 3.81 270)
+					(length 1.27)
+					(name "~"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "1"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 0 -3.81 90)
+					(length 1.27)
+					(name "~"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+					(number "2"
+						(effects
+							(font
+								(size 1.27 1.27)
+							)
+						)
+					)
+				)
+			)
+			(embedded_fonts no)
+		)
+	)
+	(text_box "Round Force Sensative Resistor"
+		(exclude_from_sim no)
+		(at 224.79 114.3 0)
+		(size 22.86 15.24)
+		(margins 0.9525 0.9525 0.9525 0.9525)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill
+			(type none)
+		)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left top)
+		)
+		(uuid "2b844cc8-c593-45e7-9a85-a3f046b477d0")
+	)
+	(text_box "Round Force Sensative Resistor"
+		(exclude_from_sim no)
+		(at 68.58 101.6 0)
+		(size 22.86 15.24)
+		(margins 0.9525 0.9525 0.9525 0.9525)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill
+			(type none)
+		)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left top)
+		)
+		(uuid "4e318ad4-7b52-4d8d-a5b2-109842d225fd")
+	)
+	(text_box "Round Force Sensative Resistor"
+		(exclude_from_sim no)
+		(at 68.58 36.83 0)
+		(size 22.86 15.24)
+		(margins 0.9525 0.9525 0.9525 0.9525)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill
+			(type none)
+		)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left top)
+		)
+		(uuid "6d65f568-4260-46ab-9f56-feb58604dc2e")
+	)
+	(text_box "Round Force Sensative Resistor"
+		(exclude_from_sim no)
+		(at 224.79 41.91 0)
+		(size 22.86 15.24)
+		(margins 0.9525 0.9525 0.9525 0.9525)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill
+			(type none)
+		)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left top)
+		)
+		(uuid "747c9b15-34d6-4df2-9122-0ebde6f8a04e")
+	)
+	(text_box "Round Force Sensative Resistor"
+		(exclude_from_sim no)
+		(at 123.19 149.86 0)
+		(size 22.86 15.24)
+		(margins 0.9525 0.9525 0.9525 0.9525)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill
+			(type none)
+		)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left top)
+		)
+		(uuid "bad9b69d-27fe-4f90-a19e-ff07d8a36468")
+	)
+	(wire
+		(pts
+			(xy 185.42 58.42) (xy 191.77 58.42)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "184a35b7-9dc7-4792-a835-a769a93ac9f9")
+	)
+	(wire
+		(pts
+			(xy 83.82 166.37) (xy 90.17 166.37)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "21a29060-213e-4e03-b2f1-48ee988330b8")
+	)
+	(polyline
+		(pts
+			(xy 107.95 154.94) (xy 123.19 154.94)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2a361391-a310-46a7-8e38-30c4e34727e5")
+	)
+	(polyline
+		(pts
+			(xy 209.55 119.38) (xy 224.79 119.38)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "2f96bed8-5e34-46a4-86b4-978ee65e66fd")
+	)
+	(polyline
+		(pts
+			(xy 97.79 166.37) (xy 107.95 166.37)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "3c49ea7d-5551-464f-bd37-8114d86c3a7f")
+	)
+	(polyline
+		(pts
+			(xy 43.18 53.34) (xy 53.34 53.34)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "519598d7-bc5a-4b70-90c5-a77323fb2d74")
+	)
+	(polyline
+		(pts
+			(xy 53.34 95.25) (xy 53.34 106.68)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "5501c64d-bc40-41dd-9e46-dab9ec00173d")
+	)
+	(wire
+		(pts
+			(xy 29.21 118.11) (xy 35.56 118.11)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "55507442-3c2b-4cf5-bdc0-4490e90fb665")
+	)
+	(polyline
+		(pts
+			(xy 107.95 143.51) (xy 107.95 154.94)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "5ff576b1-40b2-4eec-8d64-bc46d9afe04b")
+	)
+	(polyline
+		(pts
+			(xy 68.58 111.76) (xy 53.34 111.76)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "6431ba92-b038-445d-94ba-216ae8af175c")
+	)
+	(polyline
+		(pts
+			(xy 68.58 46.99) (xy 53.34 46.99)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "65f194a2-4383-4fb4-9bce-f011d578b8c4")
+	)
+	(polyline
+		(pts
+			(xy 209.55 107.95) (xy 209.55 119.38)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "68407f23-7666-4e93-bf8c-e94c53d2b1be")
+	)
+	(polyline
+		(pts
+			(xy 123.19 160.02) (xy 107.95 160.02)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "7721b4ad-064e-44dc-a106-904b4343b641")
+	)
+	(polyline
+		(pts
+			(xy 199.39 58.42) (xy 209.55 58.42)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "780d79ba-6392-451d-af5c-36bd891fa448")
+	)
+	(polyline
+		(pts
+			(xy 53.34 30.48) (xy 53.34 41.91)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "802f74b3-70ce-4df5-bbc1-2ea99eccd31c")
+	)
+	(polyline
+		(pts
+			(xy 209.55 46.99) (xy 224.79 46.99)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "80438214-df81-4c0e-a334-9b02352670f6")
+	)
+	(polyline
+		(pts
+			(xy 209.55 124.46) (xy 209.55 140.97)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "89908e2a-8e29-45c8-82dc-a83e4c07f5d6")
+	)
+	(polyline
+		(pts
+			(xy 209.55 52.07) (xy 209.55 68.58)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "8ba4c0f6-f832-4fd9-9722-40b6fc35c644")
+	)
+	(wire
+		(pts
+			(xy 29.21 53.34) (xy 35.56 53.34)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "8d2284ee-89a7-4da7-ba59-80dc9c605a3f")
+	)
+	(polyline
+		(pts
+			(xy 53.34 111.76) (xy 53.34 128.27)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "b7b00075-d8da-4442-a007-da950224e8cb")
+	)
+	(polyline
+		(pts
+			(xy 199.39 130.81) (xy 209.55 130.81)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "bcbfdee6-777b-476d-9afa-7b89e79ab94b")
+	)
+	(polyline
+		(pts
+			(xy 209.55 35.56) (xy 209.55 46.99)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "c850b85a-4936-4061-8f7b-e91a5dd45448")
+	)
+	(polyline
+		(pts
+			(xy 107.95 160.02) (xy 107.95 176.53)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d92ce381-0356-4bff-82a8-dbacc30733a8")
+	)
+	(polyline
+		(pts
+			(xy 53.34 106.68) (xy 68.58 106.68)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "d950ddf3-8533-473c-b166-7c21543457ff")
+	)
+	(polyline
+		(pts
+			(xy 53.34 41.91) (xy 68.58 41.91)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e308d69c-77da-42fb-b12b-829e6895ead4")
+	)
+	(wire
+		(pts
+			(xy 185.42 130.81) (xy 191.77 130.81)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e9c56373-e8fc-4183-b080-d0b7a8cee6c8")
+	)
+	(polyline
+		(pts
+			(xy 224.79 52.07) (xy 209.55 52.07)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "e9f661eb-598e-4669-bb14-17c264a7eca2")
+	)
+	(polyline
+		(pts
+			(xy 43.18 118.11) (xy 53.34 118.11)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "f67c8272-307d-4526-8f19-75ac131133ff")
+	)
+	(polyline
+		(pts
+			(xy 224.79 124.46) (xy 209.55 124.46)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fc545b25-6b9c-4bda-a836-d6abd7e790ae")
+	)
+	(polyline
+		(pts
+			(xy 53.34 46.99) (xy 53.34 63.5)
+		)
+		(stroke
+			(width 0)
+			(type default)
+		)
+		(uuid "fc7b995d-830e-47c3-9509-b77743c07799")
+	)
+	(global_label "FSR 2 DATA"
+		(shape output)
+		(at 29.21 118.11 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "10de491a-5780-4f34-b2de-2131ef4c99f5")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 15.0972 118.11 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "Vcc"
+		(shape input)
+		(at 107.95 143.51 90)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "21e73a60-4af4-4736-bf60-041aa83a871c")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 107.95 137.259 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "GND SENSE"
+		(shape output)
+		(at 53.34 128.27 270)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "2319267d-4fbe-4095-8581-971476ab3424")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 53.34 142.1408 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "GND SENSE"
+		(shape output)
+		(at 209.55 140.97 270)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "32bac6e4-0218-4213-a879-1cda426930cc")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 209.55 154.8408 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "GND SENSE"
+		(shape output)
+		(at 107.95 176.53 270)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "3ade3793-10a3-4122-bf2b-679f01c83453")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 107.95 190.4008 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "Vcc"
+		(shape input)
+		(at 53.34 30.48 90)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "3b30e2ee-488f-4b29-834f-1ddc100801f8")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 53.34 24.229 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "Vcc"
+		(shape input)
+		(at 209.55 35.56 90)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "495c7631-28db-4262-96cb-bbcf7df6f53b")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 209.55 29.309 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "FSR 1 DATA"
+		(shape output)
+		(at 29.21 53.34 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "6a3214fa-ec85-4450-9450-76ee35c6d087")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 15.0972 53.34 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "FSR 3 DATA"
+		(shape output)
+		(at 83.82 166.37 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "884220c2-509c-4713-9398-fe691a5e003b")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 69.7072 166.37 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "Vcc"
+		(shape input)
+		(at 209.55 107.95 90)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "94e06942-8cfe-48f4-bdde-d01432aa42c9")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 209.55 101.699 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "FSR 5 DATA"
+		(shape output)
+		(at 185.42 130.81 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "c6469d03-59ca-4a0f-86ec-025a5473cb33")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 171.3072 130.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "FSR 4 DATA"
+		(shape output)
+		(at 185.42 58.42 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "d0ef3444-f5c9-4e2f-9d58-6dbb348616e4")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 171.3072 58.42 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "GND SENSE"
+		(shape output)
+		(at 209.55 68.58 270)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "def283fe-80f4-4062-b5b6-ef678bdcccd0")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 209.55 82.4508 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "Vcc"
+		(shape input)
+		(at 53.34 95.25 90)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left)
+		)
+		(uuid "f100fe54-6d0e-4fa5-abb4-914c754aea77")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 53.34 88.999 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify left)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "GND SENSE"
+		(shape output)
+		(at 53.34 63.5 270)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "f794d1ec-7de1-40b7-8e9b-1a1f76082e4d")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 53.34 77.3708 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 195.58 58.42 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "1745f60d-c7d1-430f-8959-177c05c91592")
+		(property "Reference" "R4"
+			(at 195.58 52.07 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "10K"
+			(at 195.58 54.61 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 195.58 60.198 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 195.58 58.42 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 195.58 58.42 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "97db50da-864d-4660-8c6d-505f8bb3ea73")
+		)
+		(pin "1"
+			(uuid "c843d5ce-2f83-47cf-a97c-c35523c1f1d9")
+		)
+		(instances
+			(project "Exoskeleton Rehabilitation Glove"
+				(path "/b3f25960-ab9f-4c87-997f-9545bd70aad3/4339336b-bf32-410a-878f-61e901dbda7a"
+					(reference "R4")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 39.37 53.34 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "77c22f48-40bf-4eb7-8646-7f2fce61d8cd")
+		(property "Reference" "R1"
+			(at 39.37 46.99 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "10K"
+			(at 39.37 49.53 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 39.37 55.118 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 39.37 53.34 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 39.37 53.34 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "fb9aa8dc-4df5-4694-84c6-8fd93ae81351")
+		)
+		(pin "1"
+			(uuid "3d44cb6c-932e-468d-9acc-6c648570c627")
+		)
+		(instances
+			(project "Exoskeleton Rehabilitation Glove"
+				(path "/b3f25960-ab9f-4c87-997f-9545bd70aad3/4339336b-bf32-410a-878f-61e901dbda7a"
+					(reference "R1")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 39.37 118.11 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "c4788e21-e16e-44d3-90f0-567e89e0a99f")
+		(property "Reference" "R2"
+			(at 39.37 111.76 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "10K"
+			(at 39.37 114.3 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 39.37 119.888 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 39.37 118.11 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 39.37 118.11 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "e553e918-3132-41fb-bf0c-c1062c7c8fc9")
+		)
+		(pin "1"
+			(uuid "f78407a8-6605-4228-86b9-897784a877c7")
+		)
+		(instances
+			(project "Exoskeleton Rehabilitation Glove"
+				(path "/b3f25960-ab9f-4c87-997f-9545bd70aad3/4339336b-bf32-410a-878f-61e901dbda7a"
+					(reference "R2")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 93.98 166.37 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "e3e989cc-96d0-4def-aeb1-9692ac1824c2")
+		(property "Reference" "R3"
+			(at 93.98 160.02 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "10K"
+			(at 93.98 162.56 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 93.98 168.148 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 93.98 166.37 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 93.98 166.37 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "4f5a1ade-4c2e-475b-be36-6fefb22ab771")
+		)
+		(pin "1"
+			(uuid "2f9a58dc-5512-4ac6-ac85-50d6a5dd6e66")
+		)
+		(instances
+			(project "Exoskeleton Rehabilitation Glove"
+				(path "/b3f25960-ab9f-4c87-997f-9545bd70aad3/4339336b-bf32-410a-878f-61e901dbda7a"
+					(reference "R3")
+					(unit 1)
+				)
+			)
+		)
+	)
+	(symbol
+		(lib_id "Device:R")
+		(at 195.58 130.81 90)
+		(unit 1)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(dnp no)
+		(fields_autoplaced yes)
+		(uuid "f48bd2c2-c066-4cd0-93e0-a277002916a6")
+		(property "Reference" "R5"
+			(at 195.58 124.46 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "10K"
+			(at 195.58 127 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 195.58 132.588 90)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Datasheet" "~"
+			(at 195.58 130.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 195.58 130.81 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(hide yes)
+			)
+		)
+		(pin "2"
+			(uuid "7050dd06-f32c-415b-b866-54dc8fb1532c")
+		)
+		(pin "1"
+			(uuid "86f05eee-10e1-409e-bca8-807d9792af09")
+		)
+		(instances
+			(project "Exoskeleton Rehabilitation Glove"
+				(path "/b3f25960-ab9f-4c87-997f-9545bd70aad3/4339336b-bf32-410a-878f-61e901dbda7a"
+					(reference "R5")
+					(unit 1)
+				)
+			)
+		)
+	)
+)

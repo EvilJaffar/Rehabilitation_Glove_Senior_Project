@@ -1,0 +1,221 @@
+(kicad_sch
+	(version 20250114)
+	(generator "eeschema")
+	(generator_version "9.0")
+	(uuid "8c5d2767-3f1f-4008-9678-942da44db7c6")
+	(paper "A4")
+	(title_block
+		(date "2026-01-22")
+	)
+	(lib_symbols)
+	(text "EMG -"
+		(exclude_from_sim no)
+		(at 104.902 95.504 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "17c528e7-2600-406b-bdd7-d9cd7dab1e74")
+	)
+	(text "Signal"
+		(exclude_from_sim no)
+		(at 105.41 78.994 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "3fde6380-5fd2-44b9-b7e7-430ee41d60e1")
+	)
+	(text "2"
+		(exclude_from_sim no)
+		(at 112.522 87.376 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "523fb242-c95f-4a58-8cc7-bac21e05aaf1")
+	)
+	(text "1"
+		(exclude_from_sim no)
+		(at 112.776 78.74 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "c7c35d0f-bf59-4002-9889-d8cca97fc486")
+	)
+	(text "EMG +"
+		(exclude_from_sim no)
+		(at 104.902 87.63 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "d4ab9f47-4b80-4df2-81bd-5876bd5ea39a")
+	)
+	(text "3"
+		(exclude_from_sim no)
+		(at 112.522 94.996 0)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+		)
+		(uuid "faea4665-1042-4f35-b2bb-ef929b39ceaa")
+	)
+	(text_box "EMG Sensor"
+		(exclude_from_sim no)
+		(at 194.31 73.66 0)
+		(size 30.48 27.94)
+		(margins 0.9525 0.9525 0.9525 0.9525)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill
+			(type none)
+		)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left top)
+		)
+		(uuid "61eb3086-517d-4a11-9902-3f6b4f330e63")
+	)
+	(text_box "EMG Board"
+		(exclude_from_sim no)
+		(at 115.57 73.66 0)
+		(size 30.48 27.94)
+		(margins 0.9525 0.9525 0.9525 0.9525)
+		(stroke
+			(width 0)
+			(type solid)
+		)
+		(fill
+			(type none)
+		)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify left top)
+		)
+		(uuid "a80597c6-86b0-42cc-82d6-1ae4961b28a4")
+	)
+	(polyline
+		(pts
+			(xy 101.6 88.9) (xy 115.57 88.9)
+		)
+		(stroke
+			(width 0)
+			(type default)
+			(color 0 255 0 1)
+		)
+		(uuid "a46a5ab0-8684-46c7-8d73-8c159fe51f13")
+	)
+	(polyline
+		(pts
+			(xy 101.6 80.01) (xy 115.57 80.01)
+		)
+		(stroke
+			(width 0)
+			(type default)
+			(color 0 255 0 1)
+		)
+		(uuid "aa898952-3d73-4b67-ab96-09e140b0b45e")
+	)
+	(polyline
+		(pts
+			(xy 101.6 96.52) (xy 115.57 96.52)
+		)
+		(stroke
+			(width 0)
+			(type default)
+			(color 0 255 0 1)
+		)
+		(uuid "ca92c7e4-e5c3-478c-a01a-a2abea29656d")
+	)
+	(polyline
+		(pts
+			(xy 146.05 88.9) (xy 194.31 88.9)
+		)
+		(stroke
+			(width 0)
+			(type default)
+			(color 43 255 2 1)
+		)
+		(uuid "daf67ed2-f321-4112-85e4-0b419cb6ef4a")
+	)
+	(global_label "GND SENSE"
+		(shape output)
+		(at 101.6 96.52 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "34b7daef-c860-4cf3-a028-2c3ed60f54d6")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 87.7292 96.52 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "Vcc"
+		(shape input)
+		(at 100.33 88.9 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "44306b44-b61b-491c-ac85-327db1b05afd")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 94.079 88.9 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+	(global_label "EMG Analog"
+		(shape output)
+		(at 101.6 80.01 180)
+		(fields_autoplaced yes)
+		(effects
+			(font
+				(size 1.27 1.27)
+			)
+			(justify right)
+		)
+		(uuid "48a7ad4b-6185-4cd3-b4fe-a1774e8baeff")
+		(property "Intersheetrefs" "${INTERSHEET_REFS}"
+			(at 87.427 80.01 0)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+				(justify right)
+				(hide yes)
+			)
+		)
+	)
+)

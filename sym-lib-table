@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 0)
+  (lib (name "Exoskeleton Rehabilitation Glove-eagle-import")(type "KiCad")(uri "${KIPRJMOD}/Exoskeleton Rehabilitation Glove-eagle-import.kicad_sym")(options "")(descr ""))
+)
