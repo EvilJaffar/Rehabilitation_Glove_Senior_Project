@@ -1,347 +1,775 @@
-/**
- * ============================================================
- * REHABILITATION GLOVE — CONTROLLER PICO  (U7 / Pico A)
- * ============================================================
- *
- * ──────────────── PIN MAP (from schematic) ───────────────────
- *
- *  GPIO  0   UART0 TX  ──► Pico B RX
- *  GPIO  1   UART0 RX  ◄── Pico B TX
- *  GPIO  2   INPUT     ── Rotary Encoder A (CLK)
- *  GPIO  3   INPUT     ── Rotary Encoder B (DT)
- *  GPIO  4   INPUT     ── Glove ON/OFF toggle
- *  GPIO  6   INPUT     ── Detection Mode button
- *  GPIO  7   INPUT     ── Manual Mode button
- *  GPIO  8   INPUT     ── Rehab (Pulse) Mode button
- *  GPIO  9   INPUT     ── Glove Close (manual command)
- *  GPIO 10   INPUT     ── Glove Open  (manual command)
- *  GPIO 11   I2C1 SCL  ── ADS1115 SCL  (FSR ADC expander)
- *  GPIO 12   I2C0 SDA  ── ADS1115 SDA  (FSR ADC expander)
- *  GPIO 26   ADC0      ── EMG Analog (DFRobot Gravity SEN0240)
- *  GPIO 27   ADC1      ── (spare / future FSR direct)
- *  GPIO 28   ADC2      ── (spare / future FSR direct)
- *
- * NOTE ON I2C PINS:
- *   GPIO11 = I2C1_SCL  and  GPIO12 = I2C0_SDA are on different
- *   I2C peripherals. On the Pico, valid I2C0 pairs are:
- *     SDA: GPIO0/4/8/12/16/20   SCL: GPIO1/5/9/13/17/21
- *   GPIO12 (SDA) pairs with GPIO13 (SCL) for I2C0, but your
- *   schematic uses GPIO11 (SCL). This means both pins must be
- *   driven as a single I2C bus using i2c1 on GP10/11 or i2c0
- *   on GP12/13. The schematic label "ADC SCL / ADC SDA" suggests
- *   a dedicated I2C bus for the ADS1115; we use i2c0 on GP12/13
- *   for SDA/SCL respectively. If your ADS1115 ACTUALLY connects
- *   to GP11 & GP12, use a software I2C library instead.
- *   *** Verify with your physical wiring before flashing. ***
- *
- * ──────────────── MODES ──────────────────────────────────────
- *  Detection Mode (GPIO6) → EMG Mode:  muscles drive the glove
- *  Manual Mode    (GPIO7) → Manual:    Open/Close buttons control
- *  Rehab Mode     (GPIO8) → Pulse:     auto open/close cycle
- *  Glove ON/OFF   (GPIO4) → enables / disables motor output
- *
- * ──────────────── ADS1115 (FSR ADC expander) ─────────────────
- *  ADS1115-A  ADDR→GND  (0x48): AIN0=FSR0, AIN1=FSR1,
- *                                AIN2=FSR2, AIN3=FSR3
- *  ADS1115-B  ADDR→VDD  (0x49): AIN0=FSR4
- *  Each FSR: 3.3V ── FSR ── AINx ── 10kΩ ── GND
- *
- * ──────────────── UART PACKET FORMAT (7 bytes) ───────────────
- *  [0]  0xAA       START
- *  [1]  mode       0x01=Manual  0x02=Pulse  0x03=EMG  0x00=OFF
- *  [2]  speed      5–100  (rotary encoder)
- *  [3]  position   0=open, 1=hold, 2=close  (manual cmd)
- *  [4]  emg_cmd    0=hold  1=open  2=close
- *  [5]  fsr_flags  bit0=FSR0 … bit4=FSR4  (1=contact)
- *  [6]  checksum   [1]^[2]^[3]^[4]^[5]
- * ============================================================
- */
-
-#include "pico/stdlib.h"
-#include "hardware/adc.h"
-#include "hardware/uart.h"
-#include "hardware/i2c.h"
-#include "hardware/gpio.h"
-#include "hardware/sync.h"
 #include <stdio.h>
 #include <stdint.h>
-#include <stdbool.h>
+#include <string.h>
+#include "pico/stdlib.h"
+#include "hardware/i2c.h"
+#include "hardware/uart.h"
+#include "hardware/flash.h"
+#include "hardware/sync.h"
+
 typedef unsigned int uint;
-using namespace std;
 
-// ─── UART ─────────────────────────────────────────────────────
-#define UART_PORT     uart0
-#define BAUD_RATE     115200
-#define PIN_TX        0   // → Pico B RX
-#define PIN_RX        1   // ← Pico B TX
+// ===== I2C / ADS7830 CONFIG =====
+#define I2C_PORT        i2c0
+#define PIN_I2C_SCL     13
+#define PIN_I2C_SDA     12
+#define I2C_FREQ        100000
+#define ADS7830_ADDR    0x48
 
-// ─── ROTARY ENCODER (speed) ───────────────────────────────────
-#define PIN_ENC_A     2   // CLK / A phase
-#define PIN_ENC_B     3   // DT  / B phase
+// ADS7830 single-ended channel command bytes
+static const unsigned char ADS7830_CMD[8] = {
+    0x84, 0xC4, 0x94, 0xD4,
+    0xA4, 0xE4, 0xB4, 0xF4
+};
 
-#define SPEED_MIN     5
-#define SPEED_MAX     100
-#define SPEED_DEFAULT 50
-#define SPEED_STEP    5   // % per detent; increase for faster response
+// FSR is considered "pressed" above this raw value (0-255, 8-bit ADC)
+// Tune this to your FSR + resistor divider
+#define FSR_THRESHOLD   50
 
-static volatile int g_speed = SPEED_DEFAULT;
+// EMG is on ADS7830 channel 5 (channels 0-4 are FSRs)
+// Use startup baseline calibration plus relative thresholds so the
+// EMG command logic works with a real (non-floating) sensor signal.
+#define EMG_CHANNEL         5
+#define EMG_CLOSE_DELTA     12    // close when filtered > baseline + delta
+#define EMG_OPEN_DELTA      8     // open  when filtered < baseline - delta
+#define EMG_FILTER_SHIFT    2     // 1/(2^n)=1/4 IIR smoothing
+#define EMG_CONFIRM_SAMPLES 3     // require N consecutive samples
 
-// ─── CONTROL BUTTONS ──────────────────────────────────────────
-#define PIN_GLOVE_ONOFF       4   // toggle motor enable
-#define PIN_BTN_DETECTION     6   // → EMG mode
-#define PIN_BTN_MANUAL        7   // → Manual mode
-#define PIN_BTN_REHAB         8   // → Pulse/Rehab mode
-#define PIN_BTN_GLOVE_CLOSE   9   // manual close command
-#define PIN_BTN_GLOVE_OPEN   10   // manual open  command
+static int emg_baseline = 128;
 
-// ─── I2C (ADS1115 FSR expander) ───────────────────────────────
-// Using i2c0: SDA=GPIO12, SCL=GPIO13
-// Verify this matches your physical PCB traces.
-#define I2C_PORT      i2c0
-#define PIN_I2C_SDA   12   // ADC SDA from schematic
-#define PIN_I2C_SCL   11   // ADC SCL from schematic
-// NOTE: GP11 is technically I2C1_SCL and GP12 is I2C0_SDA.
-// If the ADS1115 fails to respond, swap to i2c1 with GP10(SDA)/GP11(SCL).
-#define I2C_FREQ      400000
+// ===== UART CONFIG =====
+#define UART_PORT   uart0
+#define BAUD_RATE   115200
+#define PIN_TX      0
+#define PIN_RX      1
 
-#define ADS_ADDR_A    0x48   // ADDR → GND  (FSR 0–3)
-#define ADS_ADDR_B    0x49   // ADDR → VDD  (FSR 4)
-#define ADS_REG_CONV  0x00
-#define ADS_REG_CFG   0x01
-// Config: OS=1 start, MUX set per channel, PGA=±4.096V, single-shot,
-//         128 SPS, comparator disabled
-#define ADS_CFG_BASE  0xC383
-static const unsigned short ADS_MUX[4] = {0x4000, 0x5000, 0x6000, 0x7000};
+// ===== PACKET PROTOCOL =====
+#define START_BYTE  0xAAu
+#define MODE_OFF    0x00u
+#define MODE_RUN    0x01u
+#define MODE_EMG    0x02u
+#define MODE_REHAB  0x03u
+#define MODE_HOMING 0x04u
+#define ENC_FB_START_BYTE 0xBBu
 
-// Tune this threshold to your FSR + 10kΩ divider.
-// ±4.096V FS, 1LSB = 0.125mV; light touch ≈ 5000 counts.
-#define FSR_THRESHOLD 5000
+// emg_cmd values
+#define EMG_HOLD    0u
+#define EMG_OPEN    1u
+#define EMG_CLOSE   2u
 
-// ─── ONBOARD ADC ──────────────────────────────────────────────
-#define ADC_CH_EMG    0   // GPIO26 — DFRobot EMG analog out
+// ===== MODE CONTROL GPIO =====
+#define PIN_MODE_EMG      6    // HIGH = EMG mode
+#define PIN_MODE_REHAB    8    // HIGH = Rehab mode
+#define PIN_MODE_MANUAL   7    // HIGH = Manual mode
 
-// EMG thresholds (12-bit, 0-4095) — calibrate per user
-#define EMG_CLOSE_THRESH  2400
-#define EMG_OPEN_THRESH    600
+// ===== USER INTERFACE GPIO =====
+#define SWITCH_OPEN_PIN         10  // Open the user's hand (Manual Mode only)
+#define SWITCH_CLOSE_PIN        11  // Close the user's hand (Manual Mode only)
+#define EMG_CALIBRATE_PIN       9   // Calibrate EMG baseline
+#define ROTARY_ENCODER_A_PIN    2   // Rotary encoder A (clock)
+#define ROTARY_ENCODER_B_PIN    3   // Rotary encoder B (data)
+#define GLOVE_START_PIN         15  // Rotary encoder push button (toggle run/stop)
+#define HOMING_CALIBRATE_PIN    14  // Calibrate home position (not implemented)
+#define HOMING_PIN              16  // Moves the Motors back to home before starting their functions
 
-// ─── PROTOCOL ─────────────────────────────────────────────────
-#define START_BYTE  0xAA
+#define CALIBRATE_DEBOUNCE_MS   250u
+#define CALIBRATE_DURATION_MS  10000u
+#define CALIBRATE_SAMPLE_MS       10u
+
+#define HOMING_DEBOUNCE_MS       250u
+#define HOMING_SPEED_PCT          15u
+#define HOMING_STALL_MS          500u
+#define HOMING_PHASE_TIMEOUT_MS 12000u
+#define HOMING_FSR_CONFIRM_SAMPLES 5u
+#define HOMING_MIN_TRAVEL_COUNTS  20
+#define HOMING_RETURN_TOL_COUNTS   4
+
+#define ENCODER_STALE_MS         300u
+
+#define HOMING_NV_MAGIC 0x484F4D45u  // 'HOME'
+#define HOMING_NV_VERSION 1u
+
+#ifndef PICO_FLASH_SIZE_BYTES
+#define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)
+#endif
+#define HOMING_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+
+#define BUTTON_DEBOUNCE_MS        80u
+#define SPEED_MIN_PCT            10u
+#define SPEED_MAX_PCT           100u
+#define SPEED_DEFAULT_PCT        40u
+
+// 4-state gray-code lookup table for quadrature decoding.
+// Index = (prev_AB << 2) | curr_AB; value = direction step.
+static const signed char ENC_LUT[16] = {
+     0, -1,  1,  0,
+     1,  0,  0, -1,
+    -1,  0,  0,  1,
+     0,  1, -1,  0
+};
 
 typedef enum {
-    MODE_OFF    = 0x00,
-    MODE_MANUAL = 0x01,
-    MODE_PULSE  = 0x02,
-    MODE_EMG    = 0x03
-} GloveMode;
+    HOMING_IDLE = 0,
+    HOMING_OPENING,
+    HOMING_CLOSING,
+    HOMING_RETURN_HOME,
+    HOMING_COMPLETE,
+    HOMING_FAILED
+} homing_state_t;
 
-// Manual position command (sent in position byte)
-typedef enum {
-    POS_HOLD  = 0,
-    POS_OPEN  = 1,
-    POS_CLOSE = 2
-} ManualCmd;
+static int g_encoder_count[5] = {0};
+static bool g_encoder_valid = false;
+static uint32_t g_encoder_last_rx_ms = 0;
 
-typedef struct __attribute__((packed)) {
-    unsigned char start;
-    unsigned char mode;
-    unsigned char speed;
-    unsigned char position;   // ManualCmd when in Manual mode
-    unsigned char emg_cmd;    // 0=hold 1=open 2=close
-    unsigned char fsr_flags;  // bit0–bit4
-    unsigned char checksum;
-} Packet;
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    int32_t open_count[5];
+    int32_t close_count[5];
+    uint8_t calibrated[5];
+    uint8_t reserved[3];
+    uint32_t checksum;
+} homing_nv_t;
 
-// ─── GLOVE ENABLE STATE ───────────────────────────────────────
-static volatile bool g_glove_enabled = false;
-static uint32_t      onoff_last_ms   = 0;
-#define DEBOUNCE_MS  200
-
-// ─── ROTARY ENCODER ISR ───────────────────────────────────────
-// Interrupt handler for rotary encoder speed updates.
-// On falling edge of channel A, it samples channel B to determine direction,
-// increments or decrements speed by SPEED_STEP, then clamps to valid bounds.
-static void encoder_isr(uint gpio, uint32_t events) {
-    if (gpio != PIN_ENC_A) return;
-    // On falling edge of A: sample B to get direction
-    bool b = gpio_get(PIN_ENC_B);
-    g_speed += b ? SPEED_STEP : -SPEED_STEP;
-    if (g_speed > SPEED_MAX) g_speed = SPEED_MAX;
-    if (g_speed < SPEED_MIN) g_speed = SPEED_MIN;
+static int abs_i(int x) {
+    return (x < 0) ? -x : x;
 }
 
-// ─── ADS1115 (ADC) ──────────────────────────────────────────────────
-// Writes a 16-bit value to an ADS1115 register over I2C.
-// Message format is: register address, high byte, low byte.
-static void ads_write_reg(unsigned char addr, unsigned char reg, unsigned short val) {
-    unsigned char buf[3] = {reg, (unsigned char)(val >> 8), (unsigned char)(val & 0xFF)};
-    i2c_write_blocking(I2C_PORT, addr, buf, 3, false);
-}
-
-// Reads the current ADS1115 conversion register as a signed 16-bit value.
-// Performs register pointer write followed by a 2-byte read transaction.
-static short ads_read_conv(unsigned char addr) {
-    unsigned char reg = ADS_REG_CONV;
-    i2c_write_blocking(I2C_PORT, addr, &reg, 1, true);
-    unsigned char buf[2];
-    i2c_read_blocking(I2C_PORT, addr, buf, 2, false);
-    return (short)((buf[0] << 8) | buf[1]);
-}
-
-// Triggers and reads a single-shot conversion for one ADS1115 channel.
-// Selects channel via MUX bits in config register, waits for conversion,
-// then returns the converted sample.
-static short ads_read_channel(unsigned char addr, unsigned char ch) {
-    unsigned short cfg = ADS_CFG_BASE | ADS_MUX[ch & 0x03];
-    ads_write_reg(addr, ADS_REG_CFG, cfg);
-    sleep_ms(9);   // 128 SPS → 7.8ms conversion time
-    return ads_read_conv(addr);
-}
-
-// Samples all FSR channels and packs touch/contact state into a bitmask.
-// Bit 0..3 map to ADS1115-A channels 0..3; bit 4 maps to ADS1115-B channel 0.
-// A bit is set when its reading exceeds FSR_THRESHOLD.
-static unsigned char read_fsr_flags() {
-    unsigned char flags = 0;
-    for (int ch = 0; ch < 4; ch++) {
-        if (ads_read_channel(ADS_ADDR_A, ch) > FSR_THRESHOLD)
-            flags |= (1u << ch);
+static uint32_t homing_checksum(const homing_nv_t* nv) {
+    uint32_t sum = 0;
+    const uint32_t* p = (const uint32_t*)nv;
+    const int words = (int)(sizeof(homing_nv_t) / sizeof(uint32_t)) - 1;
+    for (int i = 0; i < words; i++) {
+        sum ^= p[i];
     }
-    if (ads_read_channel(ADS_ADDR_B, 0) > FSR_THRESHOLD)
-        flags |= (1u << 4);
-    return flags;
+    return sum;
 }
 
-// ─── ONBOARD ADC ───────────────────────────────────────────────
-// Reads one onboard RP2040 ADC input channel.
-// Selects the channel, allows brief analog mux settle time, then returns
-// the raw ADC reading.
-static inline unsigned short read_adc(unsigned char ch) {
-    adc_select_input(ch);
-    sleep_us(10);
-    return adc_read();
+static bool load_homing_from_flash(int open_count[5], int close_count[5], bool calibrated[5]) {
+    const uint8_t* flash_ptr = (const uint8_t*)(XIP_BASE + HOMING_FLASH_OFFSET);
+    homing_nv_t nv;
+    memcpy(&nv, flash_ptr, sizeof(nv));
+
+    if (nv.magic != HOMING_NV_MAGIC || nv.version != HOMING_NV_VERSION) {
+        return false;
+    }
+    if (homing_checksum(&nv) != nv.checksum) {
+        return false;
+    }
+
+    for (int i = 0; i < 5; i++) {
+        open_count[i] = (int)nv.open_count[i];
+        close_count[i] = (int)nv.close_count[i];
+        calibrated[i] = (nv.calibrated[i] != 0u);
+    }
+    return true;
 }
 
-// ─── PACKET SEND ─────────────────────────────────────────────
-// Builds and transmits a controller packet to the motor Pico.
-// Populates all packet fields, computes checksum as XOR of bytes [1..5],
-// and writes the packed struct through UART.
-static void send_packet(GloveMode mode, unsigned char speed, unsigned char position,
-                        unsigned char emg_cmd, unsigned char fsr_flags) {
-    Packet p;
-    p.start     = START_BYTE;
-    p.mode      = mode;
-    p.speed     = speed;
-    p.position  = position;
-    p.emg_cmd   = emg_cmd;
-    p.fsr_flags = fsr_flags;
-    p.checksum  = p.mode ^ p.speed ^ p.position ^ p.emg_cmd ^ p.fsr_flags;
-    uart_write_blocking(UART_PORT, (const unsigned char*)&p, sizeof(p));
+static void clear_homing_in_flash(void) {
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(HOMING_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+    restore_interrupts(ints);
 }
 
-// ─── INIT ─────────────────────────────────────────────────────
-// Initializes all peripherals used by the controller firmware.
-// Configures UART, encoder GPIO + interrupt, control button inputs,
-// I2C bus for ADS1115 sensors, and onboard ADC for EMG sampling.
-static void hw_init() {
+static void save_homing_to_flash(const int open_count[5], const int close_count[5], const bool calibrated[5]) {
+    uint8_t sector_buf[FLASH_SECTOR_SIZE];
+    memset(sector_buf, 0xFF, sizeof(sector_buf));
+
+    homing_nv_t* nv = (homing_nv_t*)sector_buf;
+    nv->magic = HOMING_NV_MAGIC;
+    nv->version = HOMING_NV_VERSION;
+    for (int i = 0; i < 5; i++) {
+        nv->open_count[i] = (int32_t)open_count[i];
+        nv->close_count[i] = (int32_t)close_count[i];
+        nv->calibrated[i] = calibrated[i] ? 1u : 0u;
+    }
+    nv->checksum = homing_checksum(nv);
+
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(HOMING_FLASH_OFFSET, FLASH_SECTOR_SIZE);
+    flash_range_program(HOMING_FLASH_OFFSET, sector_buf, FLASH_SECTOR_SIZE);
+    restore_interrupts(ints);
+}
+
+static bool encoder_feedback_fresh(uint32_t now_ms) {
+    return g_encoder_valid && ((now_ms - g_encoder_last_rx_ms) <= ENCODER_STALE_MS);
+}
+
+// ===== ADS7830 READ =====
+unsigned char ads7830_read_channel(unsigned char channel) {
+    unsigned char cmd = ADS7830_CMD[channel & 0x07];
+    unsigned char val = 0;
+    i2c_write_blocking(I2C_PORT, ADS7830_ADDR, &cmd, 1, false);
+    sleep_us(200);
+    i2c_read_blocking(I2C_PORT, ADS7830_ADDR, &val, 1, false);
+    return val;
+}
+
+// ===== SEND UART PACKET =====
+// UI -> Motor packet (7 bytes):
+// [0]=0xAA [1]=mode [2]=speed_pct [3]=position [4]=emg cmd [5]=fsr_flags [6]=xor checksum
+void send_packet(unsigned char mode, unsigned char emg_cmd,unsigned char speed_pct, unsigned char position,
+                unsigned char fsr_flags) {
+    unsigned char pkt[7];
+    pkt[0] = START_BYTE;
+    pkt[1] = mode;
+    pkt[2] = speed_pct; // speed (0-100 %)
+    pkt[3] = position;  // position (reserved)
+    pkt[4] = emg_cmd;
+    pkt[5] = fsr_flags;
+    pkt[6] = pkt[1] ^ pkt[2] ^ pkt[3] ^ pkt[4] ^ pkt[5]; // checksum
+    uart_write_blocking(UART_PORT, pkt, 7);
+}
+
+// Motor -> UI encoder feedback packet (12 bytes):
+// [0]=0xBB [1..10]=five int16 encoder counts [11]=xor checksum.
+static void process_motor_feedback(void) {
+    static unsigned char fb_buf[12];
+    static int fb_idx = 0;
+
+    while (uart_is_readable(UART_PORT)) {
+        unsigned char b = uart_getc(UART_PORT);
+
+        if (fb_idx == 0 && b != ENC_FB_START_BYTE) {
+            continue;
+        }
+
+        fb_buf[fb_idx++] = b;
+
+        if (fb_idx >= 12) {
+            fb_idx = 0;
+
+            unsigned char chk = 0;
+            for (int i = 1; i <= 10; i++) {
+                chk ^= fb_buf[i];
+            }
+            if (chk != fb_buf[11]) {
+                continue;
+            }
+
+            for (int i = 0; i < 5; i++) {
+                int16_t c = (int16_t)((uint16_t)fb_buf[1 + i * 2]
+                                    | ((uint16_t)fb_buf[1 + i * 2 + 1] << 8));
+                g_encoder_count[i] = (int)c;
+            }
+            g_encoder_valid = true;
+            g_encoder_last_rx_ms = to_ms_since_boot(get_absolute_time());
+        }
+    }
+}
+
+static unsigned char clamp_speed_pct(int speed) {
+    // Keep speed in a safe/useful range for manual adjustment.
+    if (speed < (int)SPEED_MIN_PCT) return SPEED_MIN_PCT;
+    if (speed > (int)SPEED_MAX_PCT) return SPEED_MAX_PCT;
+    return (unsigned char)speed;
+}
+
+static void calibrate_emg_baseline() {
+    // Quick startup calibration so EMG thresholds are relative to the user at rest.
+    // Keep your hand relaxed during this short sampling window.
+    int sum = 0;
+    const int samples = 64;
+    for (int i = 0; i < samples; i++) {
+        sum += ads7830_read_channel(EMG_CHANNEL);
+        sleep_ms(5);
+    }
+    emg_baseline = sum / samples;
+    if (emg_baseline < 10) emg_baseline = 10;
+    if (emg_baseline > 245) emg_baseline = 245;
+}
+
+static void calibrate_emg_baseline_timed() {
+    // Long calibration is used on demand for better baseline re-centering.
+    printf("[CAL] Starting 10s calibration. Keep hand relaxed...\n");
+
+    uint32_t start_ms = to_ms_since_boot(get_absolute_time());
+    uint32_t last_print_s = 0;
+    unsigned int sum = 0;
+    unsigned int samples = 0;
+
+    while ((to_ms_since_boot(get_absolute_time()) - start_ms) < CALIBRATE_DURATION_MS) {
+        // Keep motors disabled throughout timed calibration.
+        send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+
+        sum += ads7830_read_channel(EMG_CHANNEL);
+        samples++;
+
+        uint32_t elapsed_ms = to_ms_since_boot(get_absolute_time()) - start_ms;
+        uint32_t elapsed_s = elapsed_ms / 1000u;
+        if (elapsed_s != last_print_s) {
+            last_print_s = elapsed_s;
+            printf("[CAL] %lus/%lus\n",
+                   (unsigned long)elapsed_s,
+                   (unsigned long)(CALIBRATE_DURATION_MS / 1000u));
+        }
+
+        sleep_ms(CALIBRATE_SAMPLE_MS);
+    }
+
+    if (samples == 0) {
+        samples = 1;
+    }
+
+    emg_baseline = (int)(sum / samples);
+    if (emg_baseline < 10) emg_baseline = 10;
+    if (emg_baseline > 245) emg_baseline = 245;
+
+    printf("[CAL] Done. New baseline=%d (close>%d open<%d)\n",
+           emg_baseline,
+           emg_baseline + EMG_CLOSE_DELTA,
+           emg_baseline - EMG_OPEN_DELTA);
+}
+
+// Reject short spikes by smoothing EMG and requiring repeated threshold hits.
+unsigned char get_emg_cmd_filtered(unsigned char* raw_out, unsigned char* filt_out) {
+    static int emg_filt = 128;
+    static unsigned char close_hits = 0;
+    static unsigned char open_hits = 0;
+
+    unsigned char raw = ads7830_read_channel(EMG_CHANNEL);
+    emg_filt += ((int)raw - emg_filt) >> EMG_FILTER_SHIFT;
+
+    int close_thresh = emg_baseline + EMG_CLOSE_DELTA;
+    int open_thresh = emg_baseline - EMG_OPEN_DELTA;
+    if (close_thresh > 250) close_thresh = 250;
+    if (open_thresh < 0) open_thresh = 0;
+    if (open_thresh >= close_thresh) open_thresh = close_thresh - 1;
+
+    unsigned char cmd = EMG_HOLD;
+    if (emg_filt > close_thresh) {
+        if (close_hits < 255) close_hits++;
+        open_hits = 0;
+        if (close_hits >= EMG_CONFIRM_SAMPLES) {
+            cmd = EMG_CLOSE;
+            close_hits = 0;
+        }
+    } else if (emg_filt < open_thresh) {
+        if (open_hits < 255) open_hits++;
+        close_hits = 0;
+        if (open_hits >= EMG_CONFIRM_SAMPLES) {
+            cmd = EMG_OPEN;
+            open_hits = 0;
+        }
+    } else {
+        close_hits = 0;
+        open_hits = 0;
+    }
+
+    if (raw_out)  *raw_out = raw;
+    if (filt_out) *filt_out = (unsigned char)emg_filt;
+    return cmd;
+}
+
+// ===== MAIN =====
+int main() {
     stdio_init_all();
+    sleep_ms(2000);
 
-    // UART0
+    // I2C init
+    i2c_init(I2C_PORT, I2C_FREQ);
+    gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
+    gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
+    gpio_pull_up(PIN_I2C_SCL);
+    gpio_pull_up(PIN_I2C_SDA);
+
+    // UART init
     uart_init(UART_PORT, BAUD_RATE);
     gpio_set_function(PIN_TX, GPIO_FUNC_UART);
     gpio_set_function(PIN_RX, GPIO_FUNC_UART);
 
-    // Rotary encoder — pull-ups, interrupt on falling CLK edge
-    gpio_init(PIN_ENC_A);
-    gpio_set_dir(PIN_ENC_A, GPIO_IN);
-    gpio_pull_up(PIN_ENC_A);
+        calibrate_emg_baseline();
+        printf("EMG baseline=%d (close>%d open<%d)\n",
+            emg_baseline,
+            emg_baseline + EMG_CLOSE_DELTA,
+                emg_baseline - EMG_OPEN_DELTA);
 
-    gpio_init(PIN_ENC_B);
-    gpio_set_dir(PIN_ENC_B, GPIO_IN);
-    gpio_pull_up(PIN_ENC_B);
+    // GPIO mode inputs
+    gpio_init(PIN_MODE_EMG);
+    gpio_set_dir(PIN_MODE_EMG, GPIO_IN);
+    gpio_pull_down(PIN_MODE_EMG);
+    
+    gpio_init(PIN_MODE_MANUAL);
+    gpio_set_dir(PIN_MODE_MANUAL, GPIO_IN);
+    gpio_pull_down(PIN_MODE_MANUAL);
 
-    gpio_set_irq_enabled_with_callback(
-        PIN_ENC_A, GPIO_IRQ_EDGE_FALL, true, &encoder_isr);
+    gpio_init(PIN_MODE_REHAB);
+    gpio_set_dir(PIN_MODE_REHAB, GPIO_IN);
+    gpio_pull_down(PIN_MODE_REHAB);
 
-    // Control buttons — pull-downs, active HIGH
-    const unsigned int btn_pins[] = {
-        PIN_GLOVE_ONOFF, PIN_BTN_DETECTION,
-        PIN_BTN_MANUAL,  PIN_BTN_REHAB,
-        PIN_BTN_GLOVE_CLOSE, PIN_BTN_GLOVE_OPEN
-    };
-    for (unsigned int pin : btn_pins) {
-        gpio_init(pin);
-        gpio_set_dir(pin, GPIO_IN);
-        gpio_pull_down(pin);
+    // Calibrate input: set HIGH to re-capture a relaxed EMG baseline.
+    gpio_init(EMG_CALIBRATE_PIN);
+    gpio_set_dir(EMG_CALIBRATE_PIN, GPIO_IN);
+    gpio_pull_down(EMG_CALIBRATE_PIN);
+
+    // Homing button input (separate from EMG calibration).
+    gpio_init(HOMING_CALIBRATE_PIN);
+    gpio_set_dir(HOMING_CALIBRATE_PIN, GPIO_IN);
+    gpio_pull_down(HOMING_CALIBRATE_PIN);
+    gpio_init(HOMING_PIN);
+    gpio_set_dir(HOMING_PIN, GPIO_IN);
+    gpio_pull_down(HOMING_PIN);
+
+    // Rotary encoder speed control (EMG, Rehab, and Manual modes)
+    gpio_init(ROTARY_ENCODER_A_PIN);
+    gpio_set_dir(ROTARY_ENCODER_A_PIN, GPIO_IN);
+    gpio_pull_up(ROTARY_ENCODER_A_PIN);
+    gpio_init(ROTARY_ENCODER_B_PIN);
+    gpio_set_dir(ROTARY_ENCODER_B_PIN, GPIO_IN);
+    gpio_pull_up(ROTARY_ENCODER_B_PIN);
+
+    // Rotary push-button toggles run/stop in active control modes.
+    gpio_init(GLOVE_START_PIN);
+    gpio_set_dir(GLOVE_START_PIN, GPIO_IN);
+    gpio_pull_up(GLOVE_START_PIN);
+
+    printf("FSR + EMG + Manual Mode Ready\n");
+
+    bool calibrate_prev = false;
+    uint32_t calibrate_last_ms = 0;
+    bool motors_enabled = false;
+    bool button_prev = (gpio_get(GLOVE_START_PIN) == 0);
+    uint32_t button_last_ms = 0;
+    unsigned char speed_pct = SPEED_DEFAULT_PCT;
+    unsigned char enc_prev = (unsigned char)((gpio_get(ROTARY_ENCODER_A_PIN) << 1)
+                                            | gpio_get(ROTARY_ENCODER_B_PIN));
+    int enc_accum = 0;
+
+    homing_state_t homing_state = HOMING_IDLE;
+    uint32_t homing_state_start_ms = 0;
+    uint32_t homing_trigger_last_ms = 0;
+    bool homing_prev = false;
+    int homing_open_count[5] = {0};
+    int homing_close_count[5] = {0};
+    bool homing_calibrated[5] = {false, false, false, false, false};
+    bool homing_open_done[5] = {false, false, false, false, false};
+    int homing_last_count[5] = {0};
+    uint32_t homing_last_move_ms[5] = {0, 0, 0, 0, 0};
+    unsigned char homing_fsr_hits[5] = {0, 0, 0, 0, 0};
+
+    if (load_homing_from_flash(homing_open_count, homing_close_count, homing_calibrated)) {
+        printf("[HOME] Loaded saved calibration from flash\n");
+    } else {
+        printf("[HOME] No valid saved calibration\n");
     }
-
-    // I2C for ADS1115
-    i2c_init(I2C_PORT, I2C_FREQ);
-    gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
-    gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
-    gpio_pull_up(PIN_I2C_SDA);
-    gpio_pull_up(PIN_I2C_SCL);
-
-    // Onboard ADC — EMG only
-    adc_init();
-    adc_gpio_init(26);   // ADC0 = EMG
-
-    printf("Controller Pico (Pico A) ready. Speed=%d%%\n", SPEED_DEFAULT);
-}
-
-// ─── MAIN ─────────────────────────────────────────────────────
-// Main control loop.
-// Reads user controls and sensors, resolves active mode/state,
-// assembles outgoing command packet, and transmits it periodically.
-int main() {
-    hw_init();
-
-    GloveMode current_mode = MODE_MANUAL;   // default to Manual
 
     while (true) {
-        uint32_t now = to_ms_since_boot(get_absolute_time());
+        // Sample mode selection pins once per loop.
+        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        process_motor_feedback();
 
-        // ── Glove ON/OFF (debounced toggle) ───────────────
-        if (gpio_get(PIN_GLOVE_ONOFF) && (now - onoff_last_ms) > DEBOUNCE_MS) {
-            g_glove_enabled = !g_glove_enabled;
-            onoff_last_ms   = now;
-            printf("[CTRL] Glove %s\n", g_glove_enabled ? "ON" : "OFF");
+        unsigned char fsr_flags = 0;
+        bool mode_emg = gpio_get(PIN_MODE_EMG);
+        bool mode_manual = gpio_get(PIN_MODE_MANUAL);
+        bool mode_rehab = gpio_get(PIN_MODE_REHAB);
+        bool calibrate_now = gpio_get(EMG_CALIBRATE_PIN);
+        bool homing_now = (gpio_get(HOMING_CALIBRATE_PIN) || gpio_get(HOMING_PIN));
+
+        if (homing_now && !homing_prev
+            && (now_ms - homing_trigger_last_ms) > HOMING_DEBOUNCE_MS
+            && homing_state == HOMING_IDLE) {
+            homing_trigger_last_ms = now_ms;
+
+            // Every press resets previous home/range before recalibration.
+            clear_homing_in_flash();
+
+            homing_state = HOMING_OPENING;
+            homing_state_start_ms = now_ms;
+
+            if (!g_encoder_valid) {
+                printf("[HOME] Waiting for encoder stream from Motor Pico...\n");
+            }
+            for (int i = 0; i < 5; i++) {
+                homing_open_done[i] = false;
+                homing_fsr_hits[i] = 0;
+                homing_open_count[i] = g_encoder_count[i];
+                homing_close_count[i] = g_encoder_count[i];
+                homing_last_count[i] = g_encoder_count[i];
+                homing_last_move_ms[i] = now_ms;
+                homing_calibrated[i] = false;
+            }
+
+            printf("[HOME] Reset + start: opening to home until encoder stall...\n");
+        }
+        homing_prev = homing_now;
+
+        // === ROTARY ENCODER (EMG, Rehab, and Manual modes) ===
+        if ((mode_emg || mode_rehab || mode_manual) && homing_state == HOMING_IDLE) {
+            // Quadrature decode using lookup table.
+            unsigned char enc_now = (unsigned char)((gpio_get(ROTARY_ENCODER_A_PIN) << 1)
+                                                   | gpio_get(ROTARY_ENCODER_B_PIN));
+            signed char step = ENC_LUT[(enc_prev << 2) | enc_now];
+            enc_prev = enc_now;
+            if (step != 0) {
+                enc_accum += (int)step;
+                if (enc_accum >= 4) {
+                    speed_pct = clamp_speed_pct((int)speed_pct + 1);
+                    enc_accum = 0;
+                    printf("[SPEED] %u%%\n", (unsigned int)speed_pct);
+                } else if (enc_accum <= -4) {
+                    speed_pct = clamp_speed_pct((int)speed_pct - 1);
+                    enc_accum = 0;
+                    printf("[SPEED] %u%%\n", (unsigned int)speed_pct);
+                }
+            }
+
+            // Debounced push-button toggles motor run/stop.
+            bool button_now = (gpio_get(GLOVE_START_PIN) == 0);
+            if (button_now != button_prev && (now_ms - button_last_ms) > BUTTON_DEBOUNCE_MS) {
+                button_last_ms = now_ms;
+                button_prev = button_now;
+                if (button_now) {
+                    motors_enabled = !motors_enabled;
+                    printf("[RUN] Motors %s\n", motors_enabled ? "ENABLED" : "STOPPED");
+                }
+            }
         }
 
-        // ── Mode buttons (priority: Detection > Manual > Rehab) ──
-        if (gpio_get(PIN_BTN_DETECTION))   current_mode = MODE_EMG;
-        else if (gpio_get(PIN_BTN_MANUAL)) current_mode = MODE_MANUAL;
-        else if (gpio_get(PIN_BTN_REHAB))  current_mode = MODE_PULSE;
+        // Read FSR channels 0-4 from ADS7830
+        for (int i = 0; i < 5; i++) {
+            unsigned char val = ads7830_read_channel((unsigned char)i);
+            if (val > FSR_THRESHOLD) {
+                fsr_flags |= (unsigned char)(1u << i);
+            }
+            printf("FSR%d=%3u ", i, (unsigned int)val);
+        }
+        printf("\n");
 
-        // If glove is off, override mode to OFF
-        GloveMode tx_mode = g_glove_enabled ? current_mode : MODE_OFF;
+        // Homing sequence overrides normal operating modes while active.
+        if (homing_state == HOMING_OPENING) {
+            if (!encoder_feedback_fresh(now_ms)) {
+                homing_state = HOMING_FAILED;
+                printf("[HOME] Encoder feedback lost during opening\n");
+            } else {
+                bool all_open_done = true;
+                for (int i = 0; i < 5; i++) {
+                    int curr = g_encoder_count[i];
+                    int delta = abs_i(curr - homing_last_count[i]);
+                    if (delta >= 1) {
+                        homing_last_count[i] = curr;
+                        homing_last_move_ms[i] = now_ms;
+                    }
+                    if (!homing_open_done[i]) {
+                        if ((now_ms - homing_last_move_ms[i]) >= HOMING_STALL_MS) {
+                            homing_open_done[i] = true;
+                            homing_open_count[i] = curr;
+                            printf("[HOME] M%d open=%d\n", i, curr);
+                        } else {
+                            all_open_done = false;
+                        }
+                    }
+                }
 
-        // ── Speed (from rotary encoder ISR, atomic read) ──
-        uint32_t saved = save_and_disable_interrupts();
-        unsigned char speed = (unsigned char)g_speed;
-        restore_interrupts(saved);
+                send_packet(MODE_HOMING, EMG_OPEN, HOMING_SPEED_PCT, 0u, 0u);
 
-        // ── Manual open/close buttons ─────────────────────
-        unsigned char manual_cmd = POS_HOLD;
-        if      (gpio_get(PIN_BTN_GLOVE_CLOSE)) manual_cmd = POS_CLOSE;
-        else if (gpio_get(PIN_BTN_GLOVE_OPEN))  manual_cmd = POS_OPEN;
-
-        // ── EMG (read only when in EMG mode) ──────────────
-        unsigned char emg_cmd = 0;
-        if (tx_mode == MODE_EMG) {
-            unsigned short raw = read_adc(ADC_CH_EMG);
-            if      (raw > EMG_CLOSE_THRESH) emg_cmd = 2;
-            else if (raw < EMG_OPEN_THRESH)  emg_cmd = 1;
+                if (all_open_done) {
+                    homing_state = HOMING_CLOSING;
+                    homing_state_start_ms = now_ms;
+                    for (int i = 0; i < 5; i++) {
+                        homing_fsr_hits[i] = 0;
+                    }
+                    printf("[HOME] Opening done. Closing until all FSRs confirm...\n");
+                } else if ((now_ms - homing_state_start_ms) > HOMING_PHASE_TIMEOUT_MS) {
+                    homing_state = HOMING_FAILED;
+                }
+            }
         }
 
-        // ── FSRs via ADS1115 (~45ms for all 5 channels) ───
-        unsigned char fsr_flags = read_fsr_flags();
+        if (homing_state == HOMING_CLOSING) {
+            if (!encoder_feedback_fresh(now_ms)) {
+                homing_state = HOMING_FAILED;
+                printf("[HOME] Encoder feedback lost during closing\n");
+                } else {
+                send_packet(MODE_HOMING, EMG_CLOSE, HOMING_SPEED_PCT, 0u, 0u);
 
-        // ── Transmit ──────────────────────────────────────
-        send_packet(tx_mode, speed, manual_cmd, emg_cmd, fsr_flags);
+                bool all_fsr_confirmed = true;
+                for (int i = 0; i < 5; i++) {
+                    bool fsr_on = ((fsr_flags & (1u << i)) != 0u);
+                    if (fsr_on) {
+                        if (homing_fsr_hits[i] < 255u) homing_fsr_hits[i]++;
+                    } else {
+                        homing_fsr_hits[i] = 0;
+                    }
 
-        printf("[CTRL] mode=%u spd=%u cmd=%u emg=%u fsr=0x%02X enabled=%d\n",
-               tx_mode, speed, manual_cmd, emg_cmd, fsr_flags, g_glove_enabled);
+                    if (homing_fsr_hits[i] < HOMING_FSR_CONFIRM_SAMPLES) {
+                        all_fsr_confirmed = false;
+                    }
+                }
 
-        sleep_ms(5);
+                if (all_fsr_confirmed) {
+                    for (int i = 0; i < 5; i++) {
+                        homing_close_count[i] = g_encoder_count[i];
+                        homing_calibrated[i] =
+                            (abs_i(homing_close_count[i] - homing_open_count[i]) >= HOMING_MIN_TRAVEL_COUNTS);
+                    }
+
+                    save_homing_to_flash(homing_open_count, homing_close_count, homing_calibrated);
+
+                    homing_state = HOMING_RETURN_HOME;
+                    homing_state_start_ms = now_ms;
+                    printf("[HOME] Close calibrated. Returning slowly to home...\n");
+                } else if ((now_ms - homing_state_start_ms) > HOMING_PHASE_TIMEOUT_MS) {
+                    homing_state = HOMING_FAILED;
+                }
+            }
+        }
+
+        if (homing_state == HOMING_RETURN_HOME) {
+            if (!encoder_feedback_fresh(now_ms)) {
+                homing_state = HOMING_FAILED;
+                printf("[HOME] Encoder feedback lost while returning home\n");
+            } else {
+                bool all_at_home = true;
+                for (int i = 0; i < 5; i++) {
+                    int curr = g_encoder_count[i];
+                    if (abs_i(curr - homing_open_count[i]) > HOMING_RETURN_TOL_COUNTS) {
+                        all_at_home = false;
+                        break;
+                    }
+                }
+
+                if (all_at_home) {
+                    send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                    homing_state = HOMING_COMPLETE;
+                } else {
+                    send_packet(MODE_HOMING, EMG_OPEN, HOMING_SPEED_PCT, 0u, 0u);
+                }
+
+                if ((now_ms - homing_state_start_ms) > HOMING_PHASE_TIMEOUT_MS) {
+                    homing_state = HOMING_FAILED;
+                }
+            }
+        }
+
+        if (homing_state == HOMING_COMPLETE) {
+            printf("[HOME] Complete:\n");
+            for (int i = 0; i < 5; i++) {
+                printf("[HOME] M%d open=%d close=%d range=%d %s\n",
+                       i,
+                       homing_open_count[i],
+                       homing_close_count[i],
+                       homing_close_count[i] - homing_open_count[i],
+                       homing_calibrated[i] ? "OK" : "LOW_TRAVEL");
+            }
+            homing_state = HOMING_IDLE;
+            motors_enabled = false;
+            sleep_ms(20);
+            continue;
+        }
+
+        if (homing_state == HOMING_FAILED) {
+            send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+            printf("[HOME] Failed or timed out. Motors stopped.\n");
+            homing_state = HOMING_IDLE;
+            motors_enabled = false;
+            sleep_ms(20);
+            continue;
+        }
+
+        if (homing_state != HOMING_IDLE) {
+            sleep_ms(20);
+            continue;
+        }
+        
+        // === EMG MODE (GPIO 5 HIGH) ===
+        if (mode_emg) {
+            unsigned char emg_raw = 0;
+            unsigned char emg_filt = 0;
+            unsigned char emg_cmd = get_emg_cmd_filtered(&emg_raw, &emg_filt);
+             printf("[EMG MODE] raw=%3u filt=%3u base=%3d cmd=%u\n",
+                   (unsigned int)emg_raw,
+                   (unsigned int)emg_filt,
+                 emg_baseline,
+                   (unsigned int)emg_cmd);
+
+            // One-shot timed calibration on rising edge in EMG mode.
+            if (calibrate_now && !calibrate_prev
+                && (now_ms - calibrate_last_ms) > CALIBRATE_DEBOUNCE_MS) {
+                calibrate_emg_baseline_timed();
+                calibrate_last_ms = to_ms_since_boot(get_absolute_time());
+                calibrate_prev = calibrate_now;
+                sleep_ms(20);
+                continue;
+            }
+            calibrate_prev = calibrate_now;
+
+            // Safety priority: FSR stop > user stop-toggle > normal EMG command.
+            if (fsr_flags != 0) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, fsr_flags);
+                printf("[UART] FSR contact (0x%02X) — Emergency stop\n", fsr_flags);
+            } else if (!motors_enabled) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+            } else {
+                send_packet(MODE_EMG, emg_cmd, speed_pct, 0u, 0u);
+                printf("[UART] EMG cmd=%u speed=%u%% sent\n",
+                       (unsigned int)emg_cmd, (unsigned int)speed_pct);
+            }
+        }
+        // === MANUAL MODE (GPIO 6 HIGH) ===
+        else if (mode_manual) {
+            unsigned char manual_cmd = EMG_HOLD;
+            bool open_pressed  = (gpio_get(SWITCH_OPEN_PIN)  == 0);
+            bool close_pressed = (gpio_get(SWITCH_CLOSE_PIN) == 0);
+
+            // Manual direction still comes from open/close buttons.
+            // Rotary encoder only changes speed_pct.
+            if (open_pressed && !close_pressed) {
+                manual_cmd = EMG_OPEN;
+            } else if (close_pressed && !open_pressed) {
+                manual_cmd = EMG_CLOSE;
+            }
+            printf("[MANUAL MODE] open=%u close=%u cmd=%u speed=%u%%\n",
+                   (unsigned int)open_pressed, (unsigned int)close_pressed,
+                   (unsigned int)manual_cmd,   (unsigned int)speed_pct);
+
+            // FSR acts as safety stop
+            if (fsr_flags != 0) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, fsr_flags);
+                printf("[UART] FSR contact (0x%02X) — Emergency stop\n", fsr_flags);
+            } else if (!motors_enabled) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+            } else {
+                send_packet(MODE_EMG, manual_cmd, speed_pct, 0u, 0u);
+                printf("[UART] Manual cmd=%u speed=%u%% sent\n",
+                       (unsigned int)manual_cmd, (unsigned int)speed_pct);
+            }
+        }
+        // === REHAB MODE (GPIO 8 HIGH) ===
+        else if (mode_rehab) {
+            // Motor Pico handles the timed open/close cycle in this mode.
+            // UI Pico still sends speed and global run/stop intent.
+            if (fsr_flags != 0) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, fsr_flags);
+                printf("[UART] REHAB: FSR contact (0x%02X) - stop sent\n", fsr_flags);
+            } else if (!motors_enabled) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+            } else {
+                send_packet(MODE_REHAB, EMG_HOLD, speed_pct, 0u, 0u);
+                printf("[UART] REHAB mode active speed=%u%%\n", (unsigned int)speed_pct);
+            }
+        }
+        // === DEFAULT MODE ===
+        else {
+            unsigned char emg_raw = 0;
+            unsigned char emg_filt = 0;
+            unsigned char emg_cmd = get_emg_cmd_filtered(&emg_raw, &emg_filt);
+            printf("[DEFAULT MODE] raw=%3u filt=%3u cmd=%u\n",
+                   (unsigned int)emg_raw,
+                   (unsigned int)emg_filt,
+                   (unsigned int)emg_cmd);
+
+            // Default: FSR contact overrides EMG
+            if (fsr_flags != 0) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, fsr_flags);
+                printf("[UART] FSR contact (0x%02X) — Stop sent\n", fsr_flags);
+            } else {
+                send_packet(MODE_EMG, emg_cmd, 0u, 0u, 0u);
+                printf("[UART] EMG cmd=%u sent\n", (unsigned int)emg_cmd);
+            }
+        }
+
+        sleep_ms(20);
     }
+
+    return 0;
 }

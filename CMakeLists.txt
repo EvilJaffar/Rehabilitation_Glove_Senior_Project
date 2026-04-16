@@ -76,32 +76,3 @@ pico_enable_stdio_usb(Main_Motor 1)
 pico_enable_stdio_uart(Main_Motor 0)
 enable_picotool_usb_reset(Main_Motor)
 pico_add_extra_outputs(Main_Motor)
-
-# ── Motor Test Bench ──────────────────────────────────────────
-# Standalone motor + encoder test controlled by two switches.
-add_executable(Motor_TB Motor_TB.cpp)
-target_link_libraries(Motor_TB
-    pico_stdlib
-    hardware_pwm
-    hardware_gpio
-    hardware_irq
-)
-pico_enable_stdio_usb(Motor_TB 1)
-pico_enable_stdio_uart(Motor_TB 0)
-enable_picotool_usb_reset(Motor_TB)
-pico_add_extra_outputs(Motor_TB)
-
-# ── ADS7830 ADC Test Bench ───────────────────────────────────
-# Controller Pico utility for validating I2C ADC wiring while
-# continuously commanding the motor Pico to remain stopped.
-add_executable(ADC_TB ADC_TB.cpp)
-target_link_libraries(ADC_TB
-    pico_stdlib
-    hardware_i2c
-    hardware_uart
-    hardware_gpio
-)
-pico_enable_stdio_usb(ADC_TB 1)
-pico_enable_stdio_uart(ADC_TB 0)
-enable_picotool_usb_reset(ADC_TB)
-pico_add_extra_outputs(ADC_TB)
