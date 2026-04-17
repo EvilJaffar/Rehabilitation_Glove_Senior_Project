@@ -24,7 +24,7 @@ static const unsigned char ADS7830_CMD[8] = {
 
 // FSR is considered "pressed" above this raw value (0-255, 8-bit ADC)
 // Tune this to your FSR + resistor divider
-#define FSR_THRESHOLD   50
+#define FSR_THRESHOLD   50  // *Needs to be tuned when glove is built
 
 // EMG is on ADS7830 channel 5 (channels 0-4 are FSRs)
 // Use startup baseline calibration plus relative thresholds so the
@@ -72,32 +72,32 @@ static int emg_baseline = 128;
 #define HOMING_CALIBRATE_PIN    14  // Calibrate home position (not implemented)
 #define HOMING_PIN              16  // Moves the Motors back to home before starting their functions
 
-#define CALIBRATE_DEBOUNCE_MS   250u
-#define CALIBRATE_DURATION_MS  10000u
-#define CALIBRATE_SAMPLE_MS       10u
+#define CALIBRATE_DEBOUNCE_MS   250u   // Minimum ms between EMG calibration button presses (debounce)
+#define CALIBRATE_DURATION_MS  10000u  // Total duration (ms) of the EMG calibration window
+#define CALIBRATE_SAMPLE_MS       10u  // Interval (ms) between EMG samples during calibration
 
-#define HOMING_DEBOUNCE_MS       250u
-#define HOMING_SPEED_PCT          15u
-#define HOMING_STALL_MS          500u
-#define HOMING_PHASE_TIMEOUT_MS 12000u
-#define HOMING_FSR_CONFIRM_SAMPLES 5u
-#define HOMING_MIN_TRAVEL_COUNTS  20
-#define HOMING_RETURN_TOL_COUNTS   4
+#define HOMING_DEBOUNCE_MS       250u  // Minimum ms between homing button presses (debounce)
+#define HOMING_SPEED_PCT          15u  // Motor speed percentage used during the homing sequence
+#define HOMING_STALL_MS          500u  // Time (ms) with no encoder movement before declaring a stall
+#define HOMING_PHASE_TIMEOUT_MS 12000u // Max time (ms) allowed for a single homing phase before failure
+#define HOMING_FSR_CONFIRM_SAMPLES 5u  // Number of consecutive FSR readings required to confirm contact
+#define HOMING_MIN_TRAVEL_COUNTS  20   // Minimum encoder counts a motor must travel to be considered moving
+#define HOMING_RETURN_TOL_COUNTS   4   // Encoder count tolerance when returning to the home position
 
-#define ENCODER_STALE_MS         300u
+#define ENCODER_STALE_MS         300u  // Time (ms) after which the last encoder reading is considered stale
 
-#define HOMING_NV_MAGIC 0x484F4D45u  // 'HOME'
-#define HOMING_NV_VERSION 1u
+#define HOMING_NV_MAGIC 0x484F4D45u    // Magic number ('HOME') used to validate stored homing data in flash
+#define HOMING_NV_VERSION 1u           // Version of the homing data structure stored in flash
 
 #ifndef PICO_FLASH_SIZE_BYTES
-#define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)
+#define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)  // Default flash size (2 MB) if not defined by the SDK
 #endif
-#define HOMING_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)
+#define HOMING_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - FLASH_SECTOR_SIZE)  // Flash address of the last sector, used to persist homing data
 
-#define BUTTON_DEBOUNCE_MS        80u
-#define SPEED_MIN_PCT            10u
-#define SPEED_MAX_PCT           100u
-#define SPEED_DEFAULT_PCT        40u
+#define BUTTON_DEBOUNCE_MS        80u  // Minimum ms between open/close/start button presses (debounce)
+#define SPEED_MIN_PCT            10u   // Minimum allowable motor speed (percent)
+#define SPEED_MAX_PCT           100u   // Maximum allowable motor speed (percent)
+#define SPEED_DEFAULT_PCT        40u   // Default motor speed on startup (percent)
 
 // 4-state gray-code lookup table for quadrature decoding.
 // Index = (prev_AB << 2) | curr_AB; value = direction step.

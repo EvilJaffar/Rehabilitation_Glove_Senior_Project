@@ -22,11 +22,11 @@ typedef unsigned int uint;
 // ===== PACKET PROTOCOL =====
 #define START_BYTE      0xAAu   // UI → Motor command packet
 #define ENC_START_BYTE  0xBBu   // Motor → UI encoder packet
-#define MODE_OFF    0x00u
-#define MODE_RUN    0x01u
-#define MODE_EMG    0x02u
-#define MODE_REHAB  0x03u
-#define MODE_HOMING 0x04u
+#define MODE_OFF        0x00u
+#define MODE_RUN        0x01u
+#define MODE_EMG        0x02u
+#define MODE_REHAB      0x03u
+#define MODE_HOMING     0x04u
 
 // emg_cmd values (mirror of Main_UI.cpp)
 #define EMG_HOLD    0u
@@ -37,11 +37,9 @@ typedef unsigned int uint;
 static const int NUM_MOTORS = 5;
 static const uint MOTOR_PWM_PIN[5] = {2, 6, 10, 14, 20};   // IN A
 static const uint MOTOR_DIR_PIN[5] = {3, 7, 11, 15, 21};   // IN B
+
 static const uint ENC_A_PIN[5] = {4, 8, 12, 16, 18}; // Channel A
 static const uint ENC_B_PIN[5] = {5, 9, 13, 17, 19}; // Channel B
-
-// ===== SWITCH PINS =====
-// (Switches moved to UI Pico; Motor Pico obeys UART commands only)
 
 // ===== PWM SETTINGS =====
 static const unsigned int PWM_TOP = 1000;
