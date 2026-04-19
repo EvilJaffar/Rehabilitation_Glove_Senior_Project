@@ -30,10 +30,10 @@ static const unsigned char ADS7830_CMD[8] = {
 // Use startup baseline calibration plus relative thresholds so the
 // EMG command logic works with a real (non-floating) sensor signal.
 #define EMG_CHANNEL         5
-#define EMG_CLOSE_DELTA     12    // close when filtered > baseline + delta
-#define EMG_OPEN_DELTA      8     // open  when filtered < baseline - delta
-#define EMG_FILTER_SHIFT    2     // 1/(2^n)=1/4 IIR smoothing
-#define EMG_CONFIRM_SAMPLES 3     // require N consecutive samples
+#define EMG_CLOSE_DELTA     4     // close when filtered > baseline + delta (tuned for ~100mV idle, small swing signals)
+#define EMG_OPEN_DELTA      2     // open  when filtered < baseline - delta (keep small: idle is near ADC floor)
+#define EMG_FILTER_SHIFT    1     // 1/(2^n)=1/2 IIR smoothing — faster response for weak signals
+#define EMG_CONFIRM_SAMPLES 2     // require N consecutive samples (lower = more sensitive, raise if false triggers)
 
 static int emg_baseline = 128;
 
@@ -69,7 +69,7 @@ static int emg_baseline = 128;
 #define ROTARY_ENCODER_A_PIN    2   // Rotary encoder A (clock)
 #define ROTARY_ENCODER_B_PIN    3   // Rotary encoder B (data)
 #define GLOVE_START_PIN         15  // Rotary encoder push button (toggle run/stop)
-#define HOMING_CALIBRATE_PIN    14  // Calibrate home position (not implemented)
+#define HOMING_CALIBRATE_PIN    14  // Calibrate home position/maping out range of motion
 #define HOMING_PIN              16  // Moves the Motors back to home before starting their functions
 
 #define CALIBRATE_DEBOUNCE_MS   250u   // Minimum ms between EMG calibration button presses (debounce)
@@ -83,6 +83,7 @@ static int emg_baseline = 128;
 #define HOMING_FSR_CONFIRM_SAMPLES 5u  // Number of consecutive FSR readings required to confirm contact
 #define HOMING_MIN_TRAVEL_COUNTS  20   // Minimum encoder counts a motor must travel to be considered moving
 #define HOMING_RETURN_TOL_COUNTS   4   // Encoder count tolerance when returning to the home position
+#define ROM_LIMIT_TOL_COUNTS       4   // Encoder tolerance used to stop before calibrated ROM endpoints
 
 #define ENCODER_STALE_MS         300u  // Time (ms) after which the last encoder reading is considered stale
 
@@ -133,6 +134,79 @@ typedef struct {
 
 static int abs_i(int x) {
     return (x < 0) ? -x : x;
+}
+
+static int sign_i(int x) {
+    if (x > 0) return 1;
+    if (x < 0) return -1;
+    return 0;
+}
+
+static bool has_any_rom_calibration(const bool calibrated[5]) {
+    for (int i = 0; i < 5; i++) {
+        if (calibrated[i]) return true;
+    }
+    return false;
+}
+
+// Returns true when a requested open/close command would push any calibrated motor
+// beyond its calibrated endpoint (with tolerance).
+static bool cmd_hits_rom_limit(unsigned char desired_cmd,
+                               const int curr_count[5],
+                               const int open_count[5],
+                               const int close_count[5],
+                               const bool calibrated[5]) {
+    if (desired_cmd != EMG_OPEN && desired_cmd != EMG_CLOSE) {
+        return false;
+    }
+
+    for (int i = 0; i < 5; i++) {
+        if (!calibrated[i]) continue;
+
+        const int curr = curr_count[i];
+        const int open_v = open_count[i];
+        const int close_v = close_count[i];
+        const int dir_to_open = sign_i(open_v - close_v);
+
+        if (dir_to_open == 0) {
+            continue;
+        }
+
+        if (desired_cmd == EMG_OPEN) {
+            if ((dir_to_open > 0 && curr >= (open_v - ROM_LIMIT_TOL_COUNTS)) ||
+                (dir_to_open < 0 && curr <= (open_v + ROM_LIMIT_TOL_COUNTS))) {
+                return true;
+            }
+        } else { // desired_cmd == EMG_CLOSE
+            if ((dir_to_open > 0 && curr <= (close_v + ROM_LIMIT_TOL_COUNTS)) ||
+                (dir_to_open < 0 && curr >= (close_v - ROM_LIMIT_TOL_COUNTS))) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// Rehab alternates direction on the Motor Pico, so stop if any calibrated motor is
+// already at either endpoint.
+static bool rehab_hits_rom_edge(const int curr_count[5],
+                                const int open_count[5],
+                                const int close_count[5],
+                                const bool calibrated[5]) {
+    for (int i = 0; i < 5; i++) {
+        if (!calibrated[i]) continue;
+
+        const int curr = curr_count[i];
+        const int lo = (open_count[i] < close_count[i]) ? open_count[i] : close_count[i];
+        const int hi = (open_count[i] > close_count[i]) ? open_count[i] : close_count[i];
+
+        if (curr <= (lo + ROM_LIMIT_TOL_COUNTS) || curr >= (hi - ROM_LIMIT_TOL_COUNTS)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static uint32_t homing_checksum(const homing_nv_t* nv) {
@@ -356,6 +430,10 @@ unsigned char get_emg_cmd_filtered(unsigned char* raw_out, unsigned char* filt_o
         open_hits = 0;
     }
 
+    // DEBUG: comment this out after tuning is complete
+    printf("[EMG] raw=%3d filt=%3d base=%3d close_thr=%3d open_thr=%3d cmd=%d\n",
+           raw, emg_filt, emg_baseline, close_thresh, open_thresh, (int)cmd);
+
     if (raw_out)  *raw_out = raw;
     if (filt_out) *filt_out = (unsigned char)emg_filt;
     return cmd;
@@ -446,6 +524,7 @@ int main() {
     int homing_last_count[5] = {0};
     uint32_t homing_last_move_ms[5] = {0, 0, 0, 0, 0};
     unsigned char homing_fsr_hits[5] = {0, 0, 0, 0, 0};
+    uint32_t rom_last_block_print_ms = 0;
 
     if (load_homing_from_flash(homing_open_count, homing_close_count, homing_calibrated)) {
         printf("[HOME] Loaded saved calibration from flash\n");
@@ -464,6 +543,8 @@ int main() {
         bool mode_rehab = gpio_get(PIN_MODE_REHAB);
         bool calibrate_now = gpio_get(EMG_CALIBRATE_PIN);
         bool homing_now = (gpio_get(HOMING_CALIBRATE_PIN) || gpio_get(HOMING_PIN));
+        bool has_rom = has_any_rom_calibration(homing_calibrated);
+        bool enc_fresh = encoder_feedback_fresh(now_ms);
 
         if (homing_now && !homing_prev
             && (now_ms - homing_trigger_last_ms) > HOMING_DEBOUNCE_MS
@@ -699,6 +780,18 @@ int main() {
                 printf("[UART] FSR contact (0x%02X) — Emergency stop\n", fsr_flags);
             } else if (!motors_enabled) {
                 send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+            } else if (has_rom && !enc_fresh) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                if ((now_ms - rom_last_block_print_ms) > 400u) {
+                    rom_last_block_print_ms = now_ms;
+                    printf("[ROM] Encoder stale; blocking EMG motion until feedback recovers\n");
+                }
+            } else if (cmd_hits_rom_limit(emg_cmd, g_encoder_count, homing_open_count, homing_close_count, homing_calibrated)) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                if ((now_ms - rom_last_block_print_ms) > 400u) {
+                    rom_last_block_print_ms = now_ms;
+                    printf("[ROM] EMG command blocked at calibrated endpoint\n");
+                }
             } else {
                 send_packet(MODE_EMG, emg_cmd, speed_pct, 0u, 0u);
                 printf("[UART] EMG cmd=%u speed=%u%% sent\n",
@@ -728,6 +821,18 @@ int main() {
                 printf("[UART] FSR contact (0x%02X) — Emergency stop\n", fsr_flags);
             } else if (!motors_enabled) {
                 send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+            } else if (has_rom && !enc_fresh) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                if ((now_ms - rom_last_block_print_ms) > 400u) {
+                    rom_last_block_print_ms = now_ms;
+                    printf("[ROM] Encoder stale; blocking manual motion until feedback recovers\n");
+                }
+            } else if (cmd_hits_rom_limit(manual_cmd, g_encoder_count, homing_open_count, homing_close_count, homing_calibrated)) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                if ((now_ms - rom_last_block_print_ms) > 400u) {
+                    rom_last_block_print_ms = now_ms;
+                    printf("[ROM] Manual command blocked at calibrated endpoint\n");
+                }
             } else {
                 send_packet(MODE_EMG, manual_cmd, speed_pct, 0u, 0u);
                 printf("[UART] Manual cmd=%u speed=%u%% sent\n",
@@ -743,6 +848,18 @@ int main() {
                 printf("[UART] REHAB: FSR contact (0x%02X) - stop sent\n", fsr_flags);
             } else if (!motors_enabled) {
                 send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+            } else if (has_rom && !enc_fresh) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                if ((now_ms - rom_last_block_print_ms) > 400u) {
+                    rom_last_block_print_ms = now_ms;
+                    printf("[ROM] Encoder stale; blocking rehab motion until feedback recovers\n");
+                }
+            } else if (rehab_hits_rom_edge(g_encoder_count, homing_open_count, homing_close_count, homing_calibrated)) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                if ((now_ms - rom_last_block_print_ms) > 400u) {
+                    rom_last_block_print_ms = now_ms;
+                    printf("[ROM] Rehab blocked at calibrated endpoint\n");
+                }
             } else {
                 send_packet(MODE_REHAB, EMG_HOLD, speed_pct, 0u, 0u);
                 printf("[UART] REHAB mode active speed=%u%%\n", (unsigned int)speed_pct);
@@ -762,6 +879,18 @@ int main() {
             if (fsr_flags != 0) {
                 send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, fsr_flags);
                 printf("[UART] FSR contact (0x%02X) — Stop sent\n", fsr_flags);
+            } else if (has_rom && !enc_fresh) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                if ((now_ms - rom_last_block_print_ms) > 400u) {
+                    rom_last_block_print_ms = now_ms;
+                    printf("[ROM] Encoder stale; blocking default EMG motion until feedback recovers\n");
+                }
+            } else if (cmd_hits_rom_limit(emg_cmd, g_encoder_count, homing_open_count, homing_close_count, homing_calibrated)) {
+                send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                if ((now_ms - rom_last_block_print_ms) > 400u) {
+                    rom_last_block_print_ms = now_ms;
+                    printf("[ROM] Default EMG command blocked at calibrated endpoint\n");
+                }
             } else {
                 send_packet(MODE_EMG, emg_cmd, 0u, 0u, 0u);
                 printf("[UART] EMG cmd=%u sent\n", (unsigned int)emg_cmd);
