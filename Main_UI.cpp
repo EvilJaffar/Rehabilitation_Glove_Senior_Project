@@ -602,6 +602,10 @@ int main() {
                 if (button_now) {
                     motors_enabled = !motors_enabled;
                     printf("[RUN] Motors %s\n", motors_enabled ? "ENABLED" : "STOPPED");
+                    if (!motors_enabled) {
+                        // Push an immediate hard-stop frame on toggle-off.
+                        send_packet(MODE_OFF, EMG_HOLD, 0u, 0u, 0u);
+                    }
                 }
             }
         }

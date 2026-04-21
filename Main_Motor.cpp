@@ -109,9 +109,11 @@ void motors_reverse() {
 }
 
 void motors_stop() {
-    // Stop is PWM=0; direction pins are left as-is.
+    // Force both H-bridge inputs low on every channel.
+    // Some drivers can still drive if direction is left asserted.
     printf("Stop\n");
     for (int i = 0; i < NUM_MOTORS; i++) {
+        gpio_put(MOTOR_DIR_PIN[i], 0);
         pwm_set_gpio_level(MOTOR_PWM_PIN[i], 0);
     }
 }
