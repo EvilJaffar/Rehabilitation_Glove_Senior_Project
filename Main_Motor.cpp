@@ -62,17 +62,26 @@ static bool rehab_closing = true;
 static uint32_t rehab_last_toggle_ms = 0u;
 
 // ===== PWM INIT =====
+static bool slice_initialized[8] = {false};  // Track which slices have been initialized
+
 void pwm_init_pin(uint gpio) {
     // Configure each motor PWM pin for a shared frequency and independent duty.
+    // Only initialize each slice once since multiple GPIOs can share a slice.
     gpio_set_function(gpio, GPIO_FUNC_PWM);
     uint slice = pwm_gpio_to_slice_num(gpio);
-    pwm_config config = pwm_get_default_config();
-    pwm_config_set_wrap(&config, PWM_TOP);
-    float sys_clk = 125000000.0f;
-    float clkdiv = sys_clk / (PWM_FREQ * (PWM_TOP + 1));
-    if (clkdiv < 1.0f) clkdiv = 1.0f;
-    pwm_config_set_clkdiv(&config, clkdiv);
-    pwm_init(slice, &config, true);
+    
+    if (!slice_initialized[slice]) {
+        pwm_config config = pwm_get_default_config();
+        pwm_config_set_wrap(&config, PWM_TOP);
+        float sys_clk = 125000000.0f;
+        float clkdiv = sys_clk / (PWM_FREQ * (PWM_TOP + 1));
+        if (clkdiv < 1.0f) clkdiv = 1.0f;
+        pwm_config_set_clkdiv(&config, clkdiv);
+        pwm_init(slice, &config, true);
+        slice_initialized[slice] = true;
+        printf("[PWM] Initialized slice %u\n", slice);
+    }
+    
     pwm_set_gpio_level(gpio, 0);
 }
 
@@ -87,11 +96,18 @@ static unsigned int speed_pct_to_pwm(unsigned char pct) {
 void motors_forward() {
     // All motors move in the same direction in current control model.
     unsigned int level = speed_pct_to_pwm(g_speed_pct);
-    printf("Forward: ");
+    printf("Forward: level=%u ", level);
     for (int i = 0; i < NUM_MOTORS; i++) {
         gpio_put(MOTOR_DIR_PIN[i], 1);
+        
+        // Restore proper PWM wrap for problematic motors
+        if (MOTOR_PWM_PIN[i] == 6 || MOTOR_PWM_PIN[i] == 20) {
+            uint slice = pwm_gpio_to_slice_num(MOTOR_PWM_PIN[i]);
+            pwm_set_wrap(slice, PWM_TOP);
+        }
+        
         pwm_set_gpio_level(MOTOR_PWM_PIN[i], level);
-        printf("M%d ", i);
+        printf("M%d(GPIO%d) ", i, MOTOR_PWM_PIN[i]);
     }
     printf("speed=%u%%\n", (unsigned int)g_speed_pct);
 }
@@ -99,23 +115,41 @@ void motors_forward() {
 void motors_reverse() {
     // Reverse direction while keeping the same commanded speed.
     unsigned int level = speed_pct_to_pwm(g_speed_pct);
-    printf("Reverse: ");
+    printf("Reverse: level=%u ", level);
     for (int i = 0; i < NUM_MOTORS; i++) {
         gpio_put(MOTOR_DIR_PIN[i], 0);
+        
+        // Restore proper PWM wrap for problematic motors
+        if (MOTOR_PWM_PIN[i] == 6 || MOTOR_PWM_PIN[i] == 20) {
+            uint slice = pwm_gpio_to_slice_num(MOTOR_PWM_PIN[i]);
+            pwm_set_wrap(slice, PWM_TOP);
+        }
+        
         pwm_set_gpio_level(MOTOR_PWM_PIN[i], level);
-        printf("M%d ", i);
+        printf("M%d(GPIO%d) ", i, MOTOR_PWM_PIN[i]);
     }
     printf("speed=%u%%\n", (unsigned int)g_speed_pct);
 }
 
 void motors_stop() {
-    // Force both H-bridge inputs low on every channel.
-    // Some drivers can still drive if direction is left asserted.
-    printf("Stop\n");
+    // Stop all motors: set PWM to 0 and force direction pins LOW
+    printf("Stop: ");
     for (int i = 0; i < NUM_MOTORS; i++) {
-        gpio_put(MOTOR_DIR_PIN[i], 0);
+        uint slice = pwm_gpio_to_slice_num(MOTOR_PWM_PIN[i]);
+        uint channel = pwm_gpio_to_channel(MOTOR_PWM_PIN[i]);
+        
+        // Force PWM level to 0 using direct channel register
+        pwm_set_chan_level(slice, channel, 0);
+        
+        // Also force PWM via the GPIO level function as backup
         pwm_set_gpio_level(MOTOR_PWM_PIN[i], 0);
+        
+        // Force direction pin LOW to disable motor
+        gpio_put(MOTOR_DIR_PIN[i], 0);
+        
+        printf("M%d ", i);
     }
+    printf("STOPPED\n");
 }
 
 // ===== ENCODER ISR =====
@@ -205,12 +239,15 @@ int main() {
     gpio_set_function(PIN_TX, GPIO_FUNC_UART);
     gpio_set_function(PIN_RX, GPIO_FUNC_UART);
 
-    // Init motor pins
+    // Init motor pins - PWM first, then direction pins
     for (int i = 0; i < NUM_MOTORS; i++) {
+        pwm_init_pin(MOTOR_PWM_PIN[i]);  // Initialize PWM first
+        
+        // Then set up direction pins as GPIO (after PWM is initialized)
         gpio_init(MOTOR_DIR_PIN[i]);
+        gpio_set_function(MOTOR_DIR_PIN[i], GPIO_FUNC_SIO);
         gpio_set_dir(MOTOR_DIR_PIN[i], GPIO_OUT);
         gpio_put(MOTOR_DIR_PIN[i], 0);
-        pwm_init_pin(MOTOR_PWM_PIN[i]);
     }
 
     // Init encoder pins
