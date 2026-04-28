@@ -25,7 +25,13 @@ set(PICO_BOARD pico2 CACHE STRING "Board type")
 # ============================================================
 
 cmake_minimum_required(VERSION 3.13)
-include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+if(DEFINED ENV{PICO_SDK_PATH} AND EXISTS "$ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake")
+    include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+elseif(EXISTS "${CMAKE_CURRENT_LIST_DIR}/pico_sdk_import.cmake")
+    include(${CMAKE_CURRENT_LIST_DIR}/pico_sdk_import.cmake)
+else()
+    message(FATAL_ERROR "Could not find pico_sdk_import.cmake. Set PICO_SDK_PATH or add pico_sdk_import.cmake to project root.")
+endif()
 
 project(rehab_glove C CXX ASM)
 set(CMAKE_C_STANDARD   11)

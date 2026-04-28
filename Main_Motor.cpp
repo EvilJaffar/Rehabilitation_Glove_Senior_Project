@@ -22,21 +22,27 @@ typedef unsigned int uint;
 // ===== PACKET PROTOCOL =====
 #define START_BYTE      0xAAu   // UI → Motor command packet
 #define ENC_START_BYTE  0xBBu   // Motor → UI encoder packet
-#define MODE_OFF        0x00u
-#define MODE_RUN        0x01u
+#define MODE_MANUAL     0x01u
 #define MODE_EMG        0x02u
 #define MODE_REHAB      0x03u
 #define MODE_HOMING     0x04u
 
-// emg_cmd values (mirror of Main_UI.cpp)
-#define EMG_HOLD    0u
-#define EMG_OPEN    1u
-#define EMG_CLOSE   2u
+// motor_cmd values (mirror of Main_UI.cpp)
+#define MOTOR_CMD_STOP    0u
+#define MOTOR_CMD_OPEN    1u
+#define MOTOR_CMD_CLOSE   2u
 
 // ===== MOTOR CONFIG =====
 static const int NUM_MOTORS = 5;
-static const uint MOTOR_PWM_PIN[5] = {2, 6, 10, 14, 20};   // IN A
-static const uint MOTOR_DIR_PIN[5] = {3, 7, 11, 15, 21};   // IN B
+// EN/IN wiring model:
+// - EN pin gets PWM duty (speed)
+// - IN pin selects direction (CW/CCW)
+static const uint MOTOR_EN_PIN[5] = {2, 6, 10, 14, 20};
+static const uint MOTOR_IN_PIN[5] = {3, 7, 11, 15, 21};
+
+// EN/IN direction polarity. Flip these if motor wiring reverses perceived CW/CCW.
+#define DIR_CW_LEVEL  1u
+#define DIR_CCW_LEVEL 0u
 
 static const uint ENC_A_PIN[5] = {4, 8, 12, 16, 18}; // Channel A
 static const uint ENC_B_PIN[5] = {5, 9, 13, 17, 19}; // Channel B
@@ -51,10 +57,15 @@ static volatile int encoder_count[5] = {0};
 // ===== UART RECEIVE STATE =====
 static unsigned char rx_buf[7];
 static int           rx_idx      = 0;
-static unsigned char g_uart_mode = MODE_RUN;
-static unsigned char g_speed_pct = 40u;  // speed from UI Pico (0-100 %)
-static unsigned char g_emg_cmd = 0;
+static unsigned char g_uart_mode = MODE_MANUAL;  // overwritten by first valid packet
+static unsigned char g_speed_pct = 0u;            // overwritten by first valid packet
+static unsigned char g_motor_cmd = MOTOR_CMD_STOP; // overwritten by first valid packet
 static unsigned char g_fsr_flags = 0;
+static unsigned char g_position = 0u;
+static uint32_t g_last_valid_pkt_ms = 0u;  // 0 = stale at boot; motors stop until first packet
+
+// If no valid UI packet arrives within this window, force motor stop.
+static const uint32_t UART_CMD_TIMEOUT_MS = 150u;
 
 // ===== REHAB MODE STATE =====
 static const uint32_t REHAB_DWELL_MS = 1200u;
@@ -94,59 +105,71 @@ static unsigned int speed_pct_to_pwm(unsigned char pct) {
 
 // ===== MOTOR CONTROL =====
 void motors_forward() {
-    // All motors move in the same direction in current control model.
+    // EN/IN CW drive: IN sets CW direction, EN gets PWM speed.
     unsigned int level = speed_pct_to_pwm(g_speed_pct);
     printf("Forward: level=%u ", level);
     for (int i = 0; i < NUM_MOTORS; i++) {
-        gpio_put(MOTOR_DIR_PIN[i], 1);
+        gpio_put(MOTOR_IN_PIN[i], DIR_CW_LEVEL);
+        
+        // Re-assert PWM function on EN pin (may have been switched to GPIO by motors_stop).
+        gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_PWM);
+        uint slice = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
+        pwm_set_enabled(slice, true);
         
         // Restore proper PWM wrap for problematic motors
-        if (MOTOR_PWM_PIN[i] == 6 || MOTOR_PWM_PIN[i] == 20) {
-            uint slice = pwm_gpio_to_slice_num(MOTOR_PWM_PIN[i]);
+        if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20) {
             pwm_set_wrap(slice, PWM_TOP);
         }
         
-        pwm_set_gpio_level(MOTOR_PWM_PIN[i], level);
-        printf("M%d(GPIO%d) ", i, MOTOR_PWM_PIN[i]);
+        pwm_set_gpio_level(MOTOR_EN_PIN[i], level);
+        printf("M%d(GPIO%d) ", i, MOTOR_EN_PIN[i]);
     }
     printf("speed=%u%%\n", (unsigned int)g_speed_pct);
 }
 
 void motors_reverse() {
-    // Reverse direction while keeping the same commanded speed.
+    // EN/IN CCW drive: IN sets CCW direction, EN gets PWM speed.
     unsigned int level = speed_pct_to_pwm(g_speed_pct);
     printf("Reverse: level=%u ", level);
     for (int i = 0; i < NUM_MOTORS; i++) {
-        gpio_put(MOTOR_DIR_PIN[i], 0);
+        gpio_put(MOTOR_IN_PIN[i], DIR_CCW_LEVEL);
+        
+        // Re-assert PWM function on EN pin (may have been switched to GPIO by motors_stop).
+        gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_PWM);
+        uint slice = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
+        pwm_set_enabled(slice, true);
         
         // Restore proper PWM wrap for problematic motors
-        if (MOTOR_PWM_PIN[i] == 6 || MOTOR_PWM_PIN[i] == 20) {
-            uint slice = pwm_gpio_to_slice_num(MOTOR_PWM_PIN[i]);
+        if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20) {
             pwm_set_wrap(slice, PWM_TOP);
         }
         
-        pwm_set_gpio_level(MOTOR_PWM_PIN[i], level);
-        printf("M%d(GPIO%d) ", i, MOTOR_PWM_PIN[i]);
+        pwm_set_gpio_level(MOTOR_EN_PIN[i], level);
+        printf("M%d(GPIO%d) ", i, MOTOR_EN_PIN[i]);
     }
     printf("speed=%u%%\n", (unsigned int)g_speed_pct);
 }
 
 void motors_stop() {
-    // Stop all motors: set PWM to 0 and force direction pins LOW
+    // EN/IN stop: zero PWM level then switch EN to GPIO-LOW for a definitive off state.
+    // Zero the PWM register first (pin still in PWM mode) so there is no spike if PWM
+    // is re-enabled by motors_forward/reverse in the next iteration.
     printf("Stop: ");
     for (int i = 0; i < NUM_MOTORS; i++) {
-        uint slice = pwm_gpio_to_slice_num(MOTOR_PWM_PIN[i]);
-        uint channel = pwm_gpio_to_channel(MOTOR_PWM_PIN[i]);
-        
-        // Force PWM level to 0 using direct channel register
+        // Zero the PWM compare level while the pin is still in PWM mode.
+        uint slice   = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
+        uint channel = pwm_gpio_to_channel(MOTOR_EN_PIN[i]);
         pwm_set_chan_level(slice, channel, 0);
-        
-        // Also force PWM via the GPIO level function as backup
-        pwm_set_gpio_level(MOTOR_PWM_PIN[i], 0);
-        
-        // Force direction pin LOW to disable motor
-        gpio_put(MOTOR_DIR_PIN[i], 0);
-        
+        pwm_set_enabled(slice, false);
+
+        // Now switch EN to GPIO output and drive it LOW.
+        gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_SIO);
+        gpio_set_dir(MOTOR_EN_PIN[i], GPIO_OUT);
+        gpio_put(MOTOR_EN_PIN[i], 0);
+
+        // Keep IN low while stopped.
+        gpio_put(MOTOR_IN_PIN[i], DIR_CCW_LEVEL);
+
         printf("M%d ", i);
     }
     printf("STOPPED\n");
@@ -217,13 +240,15 @@ void process_uart(void) {
             g_uart_mode = rx_buf[1];
             g_speed_pct = rx_buf[2];
             if (g_speed_pct > 100u) g_speed_pct = 100u;
-            g_emg_cmd   = rx_buf[4];
+            g_position = rx_buf[3];
+            g_motor_cmd = rx_buf[4];
             g_fsr_flags = rx_buf[5];
+            g_last_valid_pkt_ms = to_ms_since_boot(get_absolute_time());
 
-            printf("[UART] mode=%u speed=%u%% emg_cmd=%u fsr=0x%02X\n",
+                        printf("[UART] mode=%u speed=%u%% motor_cmd=%u fsr=0x%02X\n",
                    (unsigned int)g_uart_mode,
                    (unsigned int)g_speed_pct,
-                   (unsigned int)g_emg_cmd,
+                   (unsigned int)g_motor_cmd,
                    (unsigned int)g_fsr_flags);
         }
     }
@@ -241,13 +266,14 @@ int main() {
 
     // Init motor pins - PWM first, then direction pins
     for (int i = 0; i < NUM_MOTORS; i++) {
-        pwm_init_pin(MOTOR_PWM_PIN[i]);  // Initialize PWM first
+        pwm_init_pin(MOTOR_EN_PIN[i]);  // EN pin is PWM in EN/IN mode
         
-        // Then set up direction pins as GPIO (after PWM is initialized)
-        gpio_init(MOTOR_DIR_PIN[i]);
-        gpio_set_function(MOTOR_DIR_PIN[i], GPIO_FUNC_SIO);
-        gpio_set_dir(MOTOR_DIR_PIN[i], GPIO_OUT);
-        gpio_put(MOTOR_DIR_PIN[i], 0);
+        // Then set up IN direction pins as GPIO (after PWM is initialized)
+        gpio_init(MOTOR_IN_PIN[i]);
+        gpio_set_function(MOTOR_IN_PIN[i], GPIO_FUNC_SIO);
+        gpio_set_dir(MOTOR_IN_PIN[i], GPIO_OUT);
+        // Default to open/coast-compatible idle level in EN/IN mode.
+        gpio_put(MOTOR_IN_PIN[i], DIR_CCW_LEVEL);
     }
 
     // Init encoder pins
@@ -277,6 +303,12 @@ int main() {
     printf("Motor Ready\n");
 
     uint32_t enc_tx_last_ms = 0u;
+    // g_last_valid_pkt_ms intentionally left at 0 so cmd_stale fires
+    // immediately on boot. Motors stay stopped until the first valid
+    // UI packet is received — no preset values take effect.
+    // rehab_last_toggle_ms is set once a valid packet arrives (see process_uart),
+    // but initialize it to a large offset so REHAB dwell starts fresh on first entry.
+    rehab_last_toggle_ms = to_ms_since_boot(get_absolute_time());
 
     while (true) {
         // Always consume newest UI command before making motor decision.
@@ -289,32 +321,59 @@ int main() {
             send_encoder_packet();
         }
 
-        // Motor action driven entirely by UART packet fields.
-        if (g_uart_mode == MODE_OFF || g_fsr_flags != 0) {
-            // Safety stop from UI side has highest priority.
+        // Motor action driven by explicit mode + fresh UART command stream.
+        bool cmd_stale = ((now_ms - g_last_valid_pkt_ms) > UART_CMD_TIMEOUT_MS);
+
+        if (cmd_stale) {
+            motors_stop();
+        } else if (g_fsr_flags != 0) {
+            // FSR contact — safety stop has highest priority.
             motors_stop();
         } else if (g_uart_mode == MODE_HOMING) {
             // Homing direction is explicitly commanded by UI Pico.
-            if (g_emg_cmd == EMG_OPEN) {
+            if (g_motor_cmd == MOTOR_CMD_OPEN) {
                 motors_forward();
-            } else if (g_emg_cmd == EMG_CLOSE) {
+            } else if (g_motor_cmd == MOTOR_CMD_CLOSE) {
                 motors_reverse();
             } else {
                 motors_stop();
             }
-        } else if (g_emg_cmd == EMG_OPEN) {
-            motors_forward();
-        } else if (g_emg_cmd == EMG_CLOSE) {
-            motors_reverse();
-        } else if (g_uart_mode == MODE_REHAB) {
-            // UI Pico sends MODE_REHAB; Motor Pico handles the timed cycle.
-            if ((now_ms - rehab_last_toggle_ms) >= REHAB_DWELL_MS) {
-                rehab_closing = !rehab_closing;
-                rehab_last_toggle_ms = now_ms;
-                printf("[REHAB] %s\n", rehab_closing ? "CLOSE" : "OPEN");
+        } else if (g_uart_mode == MODE_MANUAL) {
+            // Manual mode is driven by raw switch states in packet byte[3]:
+            // bit0=open, bit1=close. This makes release->stop deterministic.
+            bool open_pressed = ((g_position & 0x01u) != 0u);
+            bool close_pressed = ((g_position & 0x02u) != 0u);
+
+            if (open_pressed && !close_pressed) {
+                motors_forward();
+            } else if (close_pressed && !open_pressed) {
+                motors_reverse();
+            } else {
+                motors_stop();
             }
-            if (rehab_closing) motors_reverse();
-            else               motors_forward();
+        } else if (g_uart_mode == MODE_EMG) {
+            // EMG mode command path.
+            if (g_motor_cmd == MOTOR_CMD_OPEN) {
+                motors_forward();
+            } else if (g_motor_cmd == MOTOR_CMD_CLOSE) {
+                motors_reverse();
+            } else {
+                motors_stop();
+            }
+        } else if (g_uart_mode == MODE_REHAB) {
+            // UI Pico sends MODE_REHAB with an explicit run token in motor_cmd.
+            // Only run the timed cycle when cmd == MOTOR_CMD_OPEN.
+            if (g_motor_cmd == MOTOR_CMD_OPEN) {
+                if ((now_ms - rehab_last_toggle_ms) >= REHAB_DWELL_MS) {
+                    rehab_closing = !rehab_closing;
+                    rehab_last_toggle_ms = now_ms;
+                    printf("[REHAB] %s\n", rehab_closing ? "CLOSE" : "OPEN");
+                }
+                if (rehab_closing) motors_reverse();
+                else               motors_forward();
+            } else {
+                motors_stop();
+            }
         } else {
             motors_stop();
         }
