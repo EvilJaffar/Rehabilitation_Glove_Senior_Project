@@ -18,7 +18,7 @@
             }
         },
         {
-            "label": "Run Project",
+            "label": "Run Project (Flash)",
             "type": "process",
             "command": "flatpak-spawn",
             "args": [
@@ -36,6 +36,15 @@
             "windows": {
                 "command": "${env:USERPROFILE}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool.exe"
             }
+        },
+        {
+            "label": "Run Project",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Run Project (Flash)",
+                "Monitor Main_UI Serial"
+            ],
+            "problemMatcher": []
         },
         {
             "label": "Run Main_Motor",
