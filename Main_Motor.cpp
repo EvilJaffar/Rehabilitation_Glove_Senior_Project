@@ -175,6 +175,38 @@ void motors_stop() {
     printf("STOPPED\n");
 }
 
+// ===== PER-MOTOR SINGLE DRIVE (used by Assistive mode for independent finger control) =====
+static void motor_forward_single(int i) {
+    unsigned int level = speed_pct_to_pwm(g_speed_pct);
+    gpio_put(MOTOR_IN_PIN[i], DIR_CW_LEVEL);
+    gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_PWM);
+    uint slice = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
+    pwm_set_enabled(slice, true);
+    if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20) pwm_set_wrap(slice, PWM_TOP);
+    pwm_set_gpio_level(MOTOR_EN_PIN[i], level);
+}
+
+static void motor_reverse_single(int i) {
+    unsigned int level = speed_pct_to_pwm(g_speed_pct);
+    gpio_put(MOTOR_IN_PIN[i], DIR_CCW_LEVEL);
+    gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_PWM);
+    uint slice = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
+    pwm_set_enabled(slice, true);
+    if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20) pwm_set_wrap(slice, PWM_TOP);
+    pwm_set_gpio_level(MOTOR_EN_PIN[i], level);
+}
+
+static void motor_stop_single(int i) {
+    uint slice   = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
+    uint channel = pwm_gpio_to_channel(MOTOR_EN_PIN[i]);
+    pwm_set_chan_level(slice, channel, 0);
+    pwm_set_enabled(slice, false);
+    gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_SIO);
+    gpio_set_dir(MOTOR_EN_PIN[i], GPIO_OUT);
+    gpio_put(MOTOR_EN_PIN[i], 0);
+    gpio_put(MOTOR_IN_PIN[i], DIR_CCW_LEVEL);
+}
+
 // ===== ENCODER ISR =====
 void gpio_irq_callback(uint gpio, unsigned long events) {
    (void)events;
@@ -352,13 +384,20 @@ int main() {
                 motors_stop();
             }
         } else if (g_uart_mode == MODE_EMG) {
-            // EMG mode command path.
-            if (g_motor_cmd == MOTOR_CMD_OPEN) {
-                motors_forward();
-            } else if (g_motor_cmd == MOTOR_CMD_CLOSE) {
-                motors_reverse();
-            } else {
-                motors_stop();
+            // Assistive mode: per-finger packed commands from UI Pico.
+            // byte[3] (g_position) packs M0-M3 as 2-bit fields: M0=bits[1:0], M1=bits[3:2], M2=bits[5:4], M3=bits[7:6]
+            // byte[4] (g_motor_cmd) packs M4 as bits[1:0]
+            // Command values: 0=STOP, 1=OPEN(forward), 2=CLOSE(reverse)
+            unsigned char finger_cmd[5];
+            finger_cmd[0] = (g_position >> 0) & 0x03u;
+            finger_cmd[1] = (g_position >> 2) & 0x03u;
+            finger_cmd[2] = (g_position >> 4) & 0x03u;
+            finger_cmd[3] = (g_position >> 6) & 0x03u;
+            finger_cmd[4] = (g_motor_cmd     ) & 0x03u;
+            for (int i = 0; i < NUM_MOTORS; i++) {
+                if      (finger_cmd[i] == MOTOR_CMD_OPEN)  motor_forward_single(i);
+                else if (finger_cmd[i] == MOTOR_CMD_CLOSE) motor_reverse_single(i);
+                else                                        motor_stop_single(i);
             }
         } else if (g_uart_mode == MODE_REHAB) {
             // UI Pico sends MODE_REHAB with an explicit run token in motor_cmd.

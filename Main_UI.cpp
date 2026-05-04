@@ -38,6 +38,16 @@ static const unsigned char ADS7830_CMD[8] = {
 
 static int emg_baseline = 128;
 
+// ===== ASSISTIVE MODE TUNING =====
+// Encoder-driven intent detection replaces EMG. Adjust per patient/session.
+#define ASSIST_DELTA_THRESH       2    // Min encoder counts per window to register intentional motion (raise to reduce noise)
+#define ASSIST_DETECT_WINDOW_MS  80u  // Evaluation window length in ms (how often intent is re-sampled)
+#define ASSIST_CONFIRM_WINDOWS    2u  // Consecutive windows required before commanding motion (raise = less false triggers)
+#define ASSIST_MIN_MOTORS         2u  // Minimum fingers that must agree on a direction before any motion is commanded
+#define ASSIST_IDLE_STOP_MS     200u  // Ms with no valid intent before forcing all motors to stop
+#define ASSIST_STALL_MS         500u  // Ms of commanded motion with near-zero encoder change before declaring stall and stopping
+#define ASSIST_DIR_HYSTERESIS     1   // Extra confirmation windows required to flip direction (prevents rapid OPEN<->CLOSE chatter)
+
 // ===== UART CONFIG =====
 #define UART_PORT   uart0
 #define BAUD_RATE   115200
@@ -70,15 +80,23 @@ static int emg_baseline = 128;
 #define SWITCH_CLOSE_PIN        11  // Close the user's hand (Manual Mode only)
 #define EMG_CALIBRATE_PIN       9   // Calibrate EMG baseline
 #define ROTARY_ENCODER_A_PIN    18   // Rotary encoder A (clock)
-#define ROTARY_ENCODER_B_PIN    17   // Rotary encoder B (data)
+#define ROTARY_ENCODER_B_PIN    17  // Rotary encoder B (data)
 #define GLOVE_START_PIN         16  // Rotary encoder push button (toggle run/stop)
-#define HOMING_CALIBRATE_PIN    14  // Calibrate home position/maping out range of motion
-#define HOMING_PIN              15  // Moves the Motors back to home before starting their functions
+#define HOMING_CALIBRATE_PIN    14  // Calibrate range of motion (open/close endpoints)
+#define HOMING_PIN              15  // Move motors to the saved home position
+#define HOME_SAVE_PIN           21  // Save current position as home (for manual mode, overrides EMG/Rehab)
+#define ABSOLUTE_OPEN_PIN       19  // Absolute open position (for manual mode, overrides EMG/Rehab)
+#define ABSOLUTE_CLOSE_PIN      20  // Absolute close position (for manual mode, overrides EMG/Rehab)
 
 // Manual switch electrical polarity.
 // 1: switch is active-low (pressed reads 0)
 // 0: switch is active-high (pressed reads 1)
 #define MANUAL_SWITCH_ACTIVE_LOW 1
+
+// Homing-related switch electrical polarity.
+// 1: switch is active-low (pressed reads 0)
+// 0: switch is active-high (pressed reads 1)
+#define HOMING_SWITCH_ACTIVE_LOW 1
 
 #define CALIBRATE_DEBOUNCE_MS   250u   // Minimum ms between EMG calibration button presses (debounce)
 #define CALIBRATE_DURATION_MS  10000u  // Total duration (ms) of the EMG calibration window
@@ -96,7 +114,7 @@ static int emg_baseline = 128;
 #define ENCODER_STALE_MS         300u  // Time (ms) after which the last encoder reading is considered stale
 
 #define HOMING_NV_MAGIC 0x484F4D45u    // Magic number ('HOME') used to validate stored homing data in flash
-#define HOMING_NV_VERSION 1u           // Version of the homing data structure stored in flash
+#define HOMING_NV_VERSION 2u           // Version of the homing data structure stored in flash
 
 #ifndef PICO_FLASH_SIZE_BYTES
 #define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)  // Default flash size (2 MB) if not defined by the SDK
@@ -106,7 +124,7 @@ static int emg_baseline = 128;
 #define BUTTON_DEBOUNCE_MS       80u   // Minimum ms between open/close/start button presses (debounce)
 #define SPEED_MIN_PCT             1u   // Minimum allowable motor speed (percent)
 #define SPEED_MAX_PCT           100u   // Maximum allowable motor speed (percent)
-#define SPEED_DEFAULT_PCT        15u   // Default motor speed on startup (percent)
+#define SPEED_DEFAULT_PCT        40u   // Default motor speed on startup (percent)
 
 // 4-state gray-code lookup table for quadrature decoding.
 // Index = (prev_AB << 2) | curr_AB; value = direction step.
@@ -154,13 +172,27 @@ typedef struct {
     bool moving;
 } motor_motion_state_t;
 
+// Per-finger encoder-driven intent detection state for Assistive mode.
+typedef struct {
+    int          prev_count[5];        // Encoder counts at last evaluation window
+    uint32_t     last_eval_ms;         // Timestamp of last window evaluation
+    uint32_t     last_intent_ms;       // Timestamp of last non-STOP intent (for idle timeout)
+    uint32_t     stall_start_ms[5];    // When motor i started being commanded with no movement
+    unsigned char open_confirm[5];     // Consecutive open-intent windows per finger
+    unsigned char close_confirm[5];    // Consecutive close-intent windows per finger
+    unsigned char cmd[5];              // Current per-finger command (MOTOR_CMD_STOP/OPEN/CLOSE)
+    bool         initialized;
+} assist_state_t;
+
 typedef struct {
     uint32_t magic;
     uint32_t version;
     int32_t open_count[5];
     int32_t close_count[5];
     uint8_t calibrated[5];
-    uint8_t reserved[3];
+    uint8_t home_saved;
+    uint8_t reserved[2];
+    int32_t home_count[5];
     uint32_t checksum;
 } homing_nv_t;
 
@@ -244,6 +276,44 @@ static bool rehab_hits_rom_edge(const int curr_count[5],
     return false;
 }
 
+// Builds per-finger OPEN/CLOSE/STOP commands that move toward saved home counts.
+// Returns true if at least one finger still needs motion.
+static bool build_go_home_cmds(const int curr_count[5],
+                               const int open_count[5],
+                               const int close_count[5],
+                               const int home_count[5],
+                               const bool calibrated[5],
+                               unsigned char cmd_out[5]) {
+    bool any_motion = false;
+    for (int i = 0; i < 5; i++) {
+        cmd_out[i] = MOTOR_CMD_STOP;
+        if (!calibrated[i]) {
+            continue;
+        }
+
+        const int curr = curr_count[i];
+        const int target = home_count[i];
+        const int delta = target - curr;
+        if (abs_i(delta) <= HOMING_RETURN_TOL_COUNTS) {
+            continue;
+        }
+
+        const int dir_to_open = sign_i(open_count[i] - close_count[i]);
+        if (dir_to_open == 0) {
+            continue;
+        }
+
+        if (dir_to_open > 0) {
+            cmd_out[i] = (delta > 0) ? MOTOR_CMD_OPEN : MOTOR_CMD_CLOSE;
+        } else {
+            cmd_out[i] = (delta > 0) ? MOTOR_CMD_CLOSE : MOTOR_CMD_OPEN;
+        }
+        any_motion = true;
+    }
+
+    return any_motion;
+}
+
 // Computes XOR checksum of the homing calibration data for flash storage validation.
 static uint32_t homing_checksum(const homing_nv_t* nv) {
     uint32_t sum = 0;
@@ -257,7 +327,8 @@ static uint32_t homing_checksum(const homing_nv_t* nv) {
 
 // Loads previously saved homing calibration (open/close positions and ROM data) from flash.
 // Returns true if valid data was found and checksum verified; false if flash is empty or corrupted.
-static bool load_homing_from_flash(int open_count[5], int close_count[5], bool calibrated[5]) {
+static bool load_homing_from_flash(int open_count[5], int close_count[5], bool calibrated[5],
+                                   int home_count[5], bool* home_saved) {
     const uint8_t* flash_ptr = (const uint8_t*)(XIP_BASE + HOMING_FLASH_OFFSET);
     homing_nv_t nv;
     memcpy(&nv, flash_ptr, sizeof(nv));
@@ -273,7 +344,9 @@ static bool load_homing_from_flash(int open_count[5], int close_count[5], bool c
         open_count[i] = (int)nv.open_count[i];
         close_count[i] = (int)nv.close_count[i];
         calibrated[i] = (nv.calibrated[i] != 0u);
+        home_count[i] = (int)nv.home_count[i];
     }
+    *home_saved = (nv.home_saved != 0u);
     return true;
 }
 
@@ -286,7 +359,8 @@ static void clear_homing_in_flash(void) {
 
 // Persists the homing calibration (open/close encoder positions and ROM validity flags)
 // to flash memory with magic number, version, and checksum for integrity validation.
-static void save_homing_to_flash(const int open_count[5], const int close_count[5], const bool calibrated[5]) {
+static void save_homing_to_flash(const int open_count[5], const int close_count[5], const bool calibrated[5],
+                                 const int home_count[5], bool home_saved) {
     uint8_t sector_buf[FLASH_SECTOR_SIZE];
     memset(sector_buf, 0xFF, sizeof(sector_buf));
 
@@ -297,7 +371,9 @@ static void save_homing_to_flash(const int open_count[5], const int close_count[
         nv->open_count[i] = (int32_t)open_count[i];
         nv->close_count[i] = (int32_t)close_count[i];
         nv->calibrated[i] = calibrated[i] ? 1u : 0u;
+        nv->home_count[i] = (int32_t)home_count[i];
     }
+    nv->home_saved = home_saved ? 1u : 0u;
     nv->checksum = homing_checksum(nv);
 
     uint32_t ints = save_and_disable_interrupts();
@@ -339,6 +415,122 @@ void send_packet(unsigned char mode, unsigned char motor_cmd,unsigned char speed
     pkt[5] = fsr_flags;
     pkt[6] = pkt[1] ^ pkt[2] ^ pkt[3] ^ pkt[4] ^ pkt[5]; // checksum
     uart_write_blocking(UART_PORT, pkt, 7);
+}
+
+// Sends a per-finger assistive mode packet over UART.
+// Packs five 2-bit per-finger commands into the position (M0-M3) and motor_cmd (M4) bytes.
+// Encoding: 0=STOP, 1=OPEN, 2=CLOSE — matches MOTOR_CMD_* constants.
+static void send_packet_assist(unsigned char speed_pct,
+                               unsigned char cmd0, unsigned char cmd1,
+                               unsigned char cmd2, unsigned char cmd3,
+                               unsigned char cmd4, unsigned char fsr_flags) {
+    unsigned char packed_lo = ((cmd3 & 0x03u) << 6) | ((cmd2 & 0x03u) << 4)
+                            | ((cmd1 & 0x03u) << 2) |  (cmd0 & 0x03u);
+    unsigned char packed_hi = (cmd4 & 0x03u);
+    send_packet(MODE_EMG, packed_hi, speed_pct, packed_lo, fsr_flags);
+}
+
+// Evaluates per-finger encoder deltas to detect user motion intent for Assistive mode.
+// Applies debounce, minimum-motor voting, direction hysteresis, stall detection, and idle timeout.
+// Populates s->cmd[i] with per-finger MOTOR_CMD_* values. Returns true if any finger is active.
+static bool update_assist_state(assist_state_t* s, uint32_t now_ms) {
+    if (!encoder_feedback_fresh(now_ms)) {
+        s->initialized = false;
+        for (int i = 0; i < 5; i++) s->cmd[i] = MOTOR_CMD_STOP;
+        return false;
+    }
+    if (!s->initialized) {
+        for (int i = 0; i < 5; i++) {
+            s->prev_count[i]     = g_encoder_count[i];
+            s->open_confirm[i]   = 0;
+            s->close_confirm[i]  = 0;
+            s->cmd[i]            = MOTOR_CMD_STOP;
+            s->stall_start_ms[i] = now_ms;
+        }
+        s->last_eval_ms   = now_ms;
+        s->last_intent_ms = now_ms;
+        s->initialized    = true;
+        return false;
+    }
+
+    // Between evaluation windows: check stall for actively commanded fingers.
+    if ((now_ms - s->last_eval_ms) < ASSIST_DETECT_WINDOW_MS) {
+        bool any_active = false;
+        for (int i = 0; i < 5; i++) {
+            if (s->cmd[i] != MOTOR_CMD_STOP) {
+                any_active = true;
+                if (g_encoder_count[i] != s->prev_count[i]) s->stall_start_ms[i] = now_ms;
+                if ((now_ms - s->stall_start_ms[i]) >= ASSIST_STALL_MS) {
+                    s->cmd[i]           = MOTOR_CMD_STOP;
+                    s->open_confirm[i]  = 0;
+                    s->close_confirm[i] = 0;
+                    printf("[ASSIST] M%d stall -> STOP\n", i);
+                }
+            }
+        }
+        return any_active;
+    }
+
+    // New evaluation window: compute per-finger deltas and update confirmations.
+    s->last_eval_ms = now_ms;
+    for (int i = 0; i < 5; i++) {
+        int delta            = g_encoder_count[i] - s->prev_count[i];
+        s->prev_count[i]     = g_encoder_count[i];
+        s->stall_start_ms[i] = now_ms;
+
+        if (delta > ASSIST_DELTA_THRESH) {
+            if (s->open_confirm[i]  < 255u) s->open_confirm[i]++;
+            if (s->close_confirm[i] > 0)    s->close_confirm[i]--;
+        } else if (delta < -ASSIST_DELTA_THRESH) {
+            if (s->close_confirm[i] < 255u) s->close_confirm[i]++;
+            if (s->open_confirm[i]  > 0)    s->open_confirm[i]--;
+        } else {
+            if (s->open_confirm[i]  > 0) s->open_confirm[i]--;
+            if (s->close_confirm[i] > 0) s->close_confirm[i]--;
+        }
+
+        // Assign per-finger command with direction hysteresis.
+        unsigned char prev_cmd = s->cmd[i];
+        if (s->open_confirm[i] >= ASSIST_CONFIRM_WINDOWS) {
+            if (prev_cmd != MOTOR_CMD_CLOSE ||
+                s->open_confirm[i] >= (unsigned char)(ASSIST_CONFIRM_WINDOWS + ASSIST_DIR_HYSTERESIS)) {
+                s->cmd[i] = MOTOR_CMD_OPEN;
+            }
+        } else if (s->close_confirm[i] >= ASSIST_CONFIRM_WINDOWS) {
+            if (prev_cmd != MOTOR_CMD_OPEN ||
+                s->close_confirm[i] >= (unsigned char)(ASSIST_CONFIRM_WINDOWS + ASSIST_DIR_HYSTERESIS)) {
+                s->cmd[i] = MOTOR_CMD_CLOSE;
+            }
+        } else {
+            s->cmd[i] = MOTOR_CMD_STOP;
+        }
+        if (s->cmd[i] != MOTOR_CMD_STOP) s->last_intent_ms = now_ms;
+    }
+
+    // Minimum-motor vote: cancel direction if too few fingers agree (noise rejection).
+    unsigned char total_open = 0, total_close = 0;
+    for (int i = 0; i < 5; i++) {
+        if (s->cmd[i] == MOTOR_CMD_OPEN)  total_open++;
+        if (s->cmd[i] == MOTOR_CMD_CLOSE) total_close++;
+    }
+    if (total_open > 0 && total_open < ASSIST_MIN_MOTORS) {
+        for (int i = 0; i < 5; i++) {
+            if (s->cmd[i] == MOTOR_CMD_OPEN) { s->cmd[i] = MOTOR_CMD_STOP; s->open_confirm[i] = 0; }
+        }
+    }
+    if (total_close > 0 && total_close < ASSIST_MIN_MOTORS) {
+        for (int i = 0; i < 5; i++) {
+            if (s->cmd[i] == MOTOR_CMD_CLOSE) { s->cmd[i] = MOTOR_CMD_STOP; s->close_confirm[i] = 0; }
+        }
+    }
+
+    // Global idle timeout: reset all if no finger has had intent for ASSIST_IDLE_STOP_MS.
+    bool any_intent = false;
+    for (int i = 0; i < 5; i++) if (s->cmd[i] != MOTOR_CMD_STOP) any_intent = true;
+    if (!any_intent && (now_ms - s->last_intent_ms) >= ASSIST_IDLE_STOP_MS) {
+        for (int i = 0; i < 5; i++) { s->open_confirm[i] = 0; s->close_confirm[i] = 0; }
+    }
+    return any_intent;
 }
 
 // Processes incoming 12-byte encoder feedback packets from Motor Pico over UART.
@@ -534,10 +726,19 @@ int main() {
     // Initialize critical control inputs before startup delay to avoid float-induced false edges.
     gpio_init(HOMING_CALIBRATE_PIN);
     gpio_set_dir(HOMING_CALIBRATE_PIN, GPIO_IN);
-    gpio_pull_down(HOMING_CALIBRATE_PIN);
     gpio_init(HOMING_PIN);
     gpio_set_dir(HOMING_PIN, GPIO_IN);
+    gpio_init(HOME_SAVE_PIN);
+    gpio_set_dir(HOME_SAVE_PIN, GPIO_IN);
+    #if HOMING_SWITCH_ACTIVE_LOW
+    gpio_pull_up(HOMING_CALIBRATE_PIN);
+    gpio_pull_up(HOMING_PIN);
+    gpio_pull_up(HOME_SAVE_PIN);
+    #else
+    gpio_pull_down(HOMING_CALIBRATE_PIN);
     gpio_pull_down(HOMING_PIN);
+    gpio_pull_down(HOME_SAVE_PIN);
+    #endif
 
     sleep_ms(2000);
 
@@ -592,14 +793,6 @@ int main() {
     gpio_pull_down(SWITCH_CLOSE_PIN);
 #endif
 
-    // Homing button input (separate from EMG calibration).
-    gpio_init(HOMING_CALIBRATE_PIN);
-    gpio_set_dir(HOMING_CALIBRATE_PIN, GPIO_IN);
-    gpio_pull_down(HOMING_CALIBRATE_PIN);
-    gpio_init(HOMING_PIN);
-    gpio_set_dir(HOMING_PIN, GPIO_IN);
-    gpio_pull_down(HOMING_PIN);
-
     // Rotary encoder speed control (EMG, Rehab, and Manual modes)
     gpio_init(ROTARY_ENCODER_A_PIN);
     gpio_set_dir(ROTARY_ENCODER_A_PIN, GPIO_IN);
@@ -618,6 +811,19 @@ int main() {
                          GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL,
                          true);
 
+    // Absolute open/close inputs for manual mode (single-press drives to ROM endpoint).
+    gpio_init(ABSOLUTE_OPEN_PIN);
+    gpio_set_dir(ABSOLUTE_OPEN_PIN, GPIO_IN);
+    gpio_init(ABSOLUTE_CLOSE_PIN);
+    gpio_set_dir(ABSOLUTE_CLOSE_PIN, GPIO_IN);
+#if MANUAL_SWITCH_ACTIVE_LOW
+    gpio_pull_up(ABSOLUTE_OPEN_PIN);
+    gpio_pull_up(ABSOLUTE_CLOSE_PIN);
+#else
+    gpio_pull_down(ABSOLUTE_OPEN_PIN);
+    gpio_pull_down(ABSOLUTE_CLOSE_PIN);
+#endif
+
     // Rotary push-button toggles run/stop in active control modes.
     gpio_init(GLOVE_START_PIN);
     gpio_set_dir(GLOVE_START_PIN, GPIO_IN);
@@ -634,27 +840,68 @@ int main() {
     unsigned char speed_pct = SPEED_DEFAULT_PCT;
     int enc_accum = 0;
     motor_motion_state_t motor_motion = {0};
+    assist_state_t assist_state = {0};
 
     homing_state_t homing_state = HOMING_IDLE;
     uint32_t homing_state_start_ms = 0;
     uint32_t homing_trigger_last_ms = 0;
-    bool homing_prev = (gpio_get(HOMING_PIN) != 0);
-    bool homing_armed = false;
+        bool homing_cal_level_high = (gpio_get(HOMING_CALIBRATE_PIN) != 0);
+        bool homing_cal_prev =
+    #if HOMING_SWITCH_ACTIVE_LOW
+        !homing_cal_level_high;
+    #else
+        homing_cal_level_high;
+    #endif
+    bool homing_cal_armed = false;
+        bool home_level_high = (gpio_get(HOMING_PIN) != 0);
+        bool home_prev =
+    #if HOMING_SWITCH_ACTIVE_LOW
+        !home_level_high;
+    #else
+        home_level_high;
+    #endif
+    bool home_armed = false;
+        bool home_save_level_high = (gpio_get(HOME_SAVE_PIN) != 0);
+        bool home_save_prev =
+    #if HOMING_SWITCH_ACTIVE_LOW
+        !home_save_level_high;
+    #else
+        home_save_level_high;
+    #endif
+    bool home_save_armed = false;
+    uint32_t home_last_ms = 0;
+    uint32_t home_save_last_ms = 0;
     int homing_open_count[5] = {0};
     int homing_close_count[5] = {0};
+    int homing_home_count[5] = {0};
     bool homing_calibrated[5] = {false, false, false, false, false};
+    bool homing_home_saved = false;
+    bool go_home_active = false;
     bool homing_open_done[5] = {false, false, false, false, false};
     int homing_last_count[5] = {0};
     uint32_t homing_last_move_ms[5] = {0, 0, 0, 0, 0};
     unsigned char homing_fsr_hits[5] = {0, 0, 0, 0, 0};
+    uint32_t homing_status_last_ms = 0;
     uint32_t rom_last_block_print_ms = 0;
     uint32_t manual_diag_last_ms = 0;
     unsigned char fsr_hits[5] = {0, 0, 0, 0, 0};  // debounce counters for each FSR
     unsigned char open_button_hits = 0;   // debounce counter for open button
     unsigned char close_button_hits = 0;  // debounce counter for close button
+    // Absolute move state: 0=none, 1=opening to ROM open endpoint, 2=closing to ROM close endpoint.
+    unsigned char abs_move_target = 0u;
+    unsigned char abs_open_hits  = 0;   // debounce counter for absolute open button
+    unsigned char abs_close_hits = 0;   // debounce counter for absolute close button
+    bool abs_open_prev  = false;        // last debounced state (for rising-edge detection)
+    bool abs_close_prev = false;
 
-    if (load_homing_from_flash(homing_open_count, homing_close_count, homing_calibrated)) {
+    if (load_homing_from_flash(homing_open_count, homing_close_count, homing_calibrated,
+                               homing_home_count, &homing_home_saved)) {
         printf("[HOME] Loaded saved calibration from flash\n");
+        if (homing_home_saved) {
+            printf("[HOME] Loaded saved home target\n");
+        } else {
+            printf("[HOME] No saved home target yet\n");
+        }
     } else {
         printf("[HOME] No valid saved calibration\n");
     }
@@ -700,28 +947,103 @@ int main() {
         bool mode_manual_effective = (!mode_default_active && (selected_mode == MODE_MANUAL));
         
         bool emg_calibrate_now = gpio_get(EMG_CALIBRATE_PIN);
-        // Homing trigger is only from HOMING_PIN.
-        bool homing_now = (gpio_get(HOMING_PIN) != 0);
+        // ROM calibration trigger is from HOMING_CALIBRATE_PIN.
+        bool homing_cal_level_high_now = (gpio_get(HOMING_CALIBRATE_PIN) != 0);
+        bool homing_cal_now =
+    #if HOMING_SWITCH_ACTIVE_LOW
+            !homing_cal_level_high_now;
+    #else
+            homing_cal_level_high_now;
+    #endif
+        // Return-to-home trigger is from HOMING_PIN.
+        bool home_level_high_now = (gpio_get(HOMING_PIN) != 0);
+        bool home_now =
+    #if HOMING_SWITCH_ACTIVE_LOW
+            !home_level_high_now;
+    #else
+            home_level_high_now;
+    #endif
+        // Save current encoder position as home.
+        bool home_save_level_high_now = (gpio_get(HOME_SAVE_PIN) != 0);
+        bool home_save_now =
+    #if HOMING_SWITCH_ACTIVE_LOW
+            !home_save_level_high_now;
+    #else
+            home_save_level_high_now;
+    #endif
         bool has_rom = has_any_rom_calibration(homing_calibrated);
         bool enc_fresh = encoder_feedback_fresh(now_ms);
-        // Arm homing only after both homing inputs are observed LOW after boot.
-        if (!homing_armed) {
-            if (!homing_now) {
-                homing_armed = true;
+        // Arm edge detection only after pins are observed LOW after boot.
+        if (!homing_cal_armed) {
+            if (!homing_cal_now) {
+                homing_cal_armed = true;
             }
-            homing_prev = homing_now;
+            homing_cal_prev = homing_cal_now;
+        }
+        if (!home_armed) {
+            if (!home_now) {
+                home_armed = true;
+            }
+            home_prev = home_now;
+        }
+        if (!home_save_armed) {
+            if (!home_save_now) {
+                home_save_armed = true;
+            }
+            home_save_prev = home_save_now;
         }
 
-        if (homing_armed && homing_now && !homing_prev
+        if (home_save_armed && home_save_now && !home_save_prev
+            && (now_ms - home_save_last_ms) > HOMING_DEBOUNCE_MS
+            && homing_state == HOMING_IDLE) {
+            home_save_last_ms = now_ms;
+            if (has_rom && enc_fresh) {
+                for (int i = 0; i < 5; i++) {
+                    homing_home_count[i] = g_encoder_count[i];
+                }
+                homing_home_saved = true;
+                save_homing_to_flash(homing_open_count, homing_close_count, homing_calibrated,
+                                     homing_home_count, homing_home_saved);
+                printf("[HOME] Saved current position as home\n");
+                for (int i = 0; i < 5; i++) {
+                    printf("[HOME] M%d home=%d\n", i, homing_home_count[i]);
+                }
+            } else {
+                printf("[HOME] Save ignored: need ROM calibration and fresh encoders\n");
+            }
+        }
+        home_save_prev = home_save_now;
+
+        if (home_armed && home_now && !home_prev
+            && (now_ms - home_last_ms) > HOMING_DEBOUNCE_MS
+            && homing_state == HOMING_IDLE) {
+            home_last_ms = now_ms;
+            if (homing_home_saved && has_rom && enc_fresh) {
+                go_home_active = true;
+                abs_move_target = 0u;
+                printf("[HOME] Go-home started\n");
+            } else {
+                printf("[HOME] Go-home ignored: no saved home, missing ROM, or stale encoder\n");
+            }
+        }
+        home_prev = home_now;
+
+        if (homing_cal_armed && homing_cal_now && !homing_cal_prev
             && (now_ms - homing_trigger_last_ms) > HOMING_DEBOUNCE_MS
             && homing_state == HOMING_IDLE) {
             homing_trigger_last_ms = now_ms;
 
             // Every press resets previous home/range before recalibration.
             clear_homing_in_flash();
+            homing_home_saved = false;
+            go_home_active = false;
+            for (int i = 0; i < 5; i++) {
+                homing_home_count[i] = 0;
+            }
 
             homing_state = HOMING_OPENING;
             homing_state_start_ms = now_ms;
+            homing_status_last_ms = now_ms;
 
             if (!g_encoder_valid) {
                 printf("[HOME] Waiting for encoder stream from Motor Pico...\n");
@@ -736,9 +1058,10 @@ int main() {
                 homing_calibrated[i] = false;
             }
 
-            printf("[HOME] Reset + start: opening to home until encoder stall...\n");
+            printf("[ROM CAL] START: calibrating motor range of motion\n");
+            printf("[ROM CAL] Phase 1/3: opening to home until encoder stall...\n");
         }
-        homing_prev = homing_now;
+        homing_cal_prev = homing_cal_now;
 
         // === ROTARY ENCODER (EMG, Rehab, and Manual modes) ===
         if ((mode_emg || mode_rehab || mode_manual_effective) && homing_state == HOMING_IDLE) {
@@ -813,6 +1136,10 @@ int main() {
                 homing_state = HOMING_FAILED;
                 printf("[HOME] Encoder feedback lost during opening\n");
             } else {
+                if ((now_ms - homing_status_last_ms) >= 1000u) {
+                    homing_status_last_ms = now_ms;
+                    printf("[ROM CAL] Phase 1/3 in progress...\n");
+                }
                 bool all_open_done = true;
                 for (int i = 0; i < 5; i++) {
                     int curr = g_encoder_count[i];
@@ -837,10 +1164,12 @@ int main() {
                 if (all_open_done) {
                     homing_state = HOMING_CLOSING;
                     homing_state_start_ms = now_ms;
+                    homing_status_last_ms = now_ms;
                     for (int i = 0; i < 5; i++) {
                         homing_fsr_hits[i] = 0;
                     }
-                    printf("[HOME] Opening done. Closing until all FSRs confirm...\n");
+                    printf("[ROM CAL] Phase 1/3 complete\n");
+                    printf("[ROM CAL] Phase 2/3: closing until all FSRs confirm...\n");
                 } else if ((now_ms - homing_state_start_ms) > HOMING_PHASE_TIMEOUT_MS) {
                     homing_state = HOMING_FAILED;
                 }
@@ -852,6 +1181,10 @@ int main() {
                 homing_state = HOMING_FAILED;
                 printf("[HOME] Encoder feedback lost during closing\n");
                 } else {
+                if ((now_ms - homing_status_last_ms) >= 1000u) {
+                    homing_status_last_ms = now_ms;
+                    printf("[ROM CAL] Phase 2/3 in progress...\n");
+                }
                 send_packet(MODE_HOMING, MOTOR_CMD_CLOSE, HOMING_SPEED_PCT, 0u, 0u);
 
                 bool all_fsr_confirmed = true;
@@ -875,11 +1208,14 @@ int main() {
                             (abs_i(homing_close_count[i] - homing_open_count[i]) >= HOMING_MIN_TRAVEL_COUNTS);
                     }
 
-                    save_homing_to_flash(homing_open_count, homing_close_count, homing_calibrated);
+                    save_homing_to_flash(homing_open_count, homing_close_count, homing_calibrated,
+                                         homing_home_count, homing_home_saved);
 
                     homing_state = HOMING_RETURN_HOME;
                     homing_state_start_ms = now_ms;
-                    printf("[HOME] Close calibrated. Returning slowly to home...\n");
+                    homing_status_last_ms = now_ms;
+                    printf("[ROM CAL] Phase 2/3 complete\n");
+                    printf("[ROM CAL] Phase 3/3: returning slowly to home...\n");
                 } else if ((now_ms - homing_state_start_ms) > HOMING_PHASE_TIMEOUT_MS) {
                     homing_state = HOMING_FAILED;
                 }
@@ -891,6 +1227,10 @@ int main() {
                 homing_state = HOMING_FAILED;
                 printf("[HOME] Encoder feedback lost while returning home\n");
             } else {
+                if ((now_ms - homing_status_last_ms) >= 1000u) {
+                    homing_status_last_ms = now_ms;
+                    printf("[ROM CAL] Phase 3/3 in progress...\n");
+                }
                 bool all_at_home = true;
                 for (int i = 0; i < 5; i++) {
                     int curr = g_encoder_count[i];
@@ -914,6 +1254,7 @@ int main() {
         }
 
         if (homing_state == HOMING_COMPLETE) {
+            printf("[ROM CAL] COMPLETE: range-of-motion calibration finished\n");
             printf("[HOME] Complete:\n");
             for (int i = 0; i < 5; i++) {
                 printf("[HOME] M%d open=%d close=%d range=%d %s\n",
@@ -931,6 +1272,7 @@ int main() {
 
         if (homing_state == HOMING_FAILED) {
             send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, 0u);
+            printf("[ROM CAL] FAILED: calibration aborted\n");
             printf("[HOME] Failed or timed out. Motors stopped.\n");
             homing_state = HOMING_IDLE;
             motors_enabled = false;
@@ -941,51 +1283,97 @@ int main() {
             sleep_ms(20);
             continue;
         }
-        
-        // === EMG MODE (GPIO 5 HIGH) ===
-        if (mode_emg) {
-            unsigned char emg_raw = 0;
-            unsigned char emg_filt = 0;
-            unsigned char motor_cmd = get_emg_cmd_filtered(&emg_raw, &emg_filt);
-                        bool motors_spinning = update_motor_motion_state(&motor_motion, now_ms);
-                        printf("[EMG MODE] btn=%s motors=%s raw=%3u filt=%3u base=%3d cmd=%u\n",
-                                     button_latched_started ? "STARTED" : "STOPPED",
-                                     motors_spinning ? "SPINNING" : "STOPPED",
-                                     (unsigned int)emg_raw,
-                                     (unsigned int)emg_filt,
-                                     emg_baseline,
-                                     (unsigned int)motor_cmd);
 
-            // One-shot timed calibration on rising edge in EMG mode.
-            if (emg_calibrate_now && !emg_calibrate_prev
-                && (now_ms - calibrate_last_ms) > CALIBRATE_DEBOUNCE_MS) {
-                calibrate_emg_baseline_timed();
-                calibrate_last_ms = to_ms_since_boot(get_absolute_time());
-                emg_calibrate_prev = emg_calibrate_now;
+        if (go_home_active) {
+            if (fsr_flags != 0u) {
+                go_home_active = false;
+                send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, fsr_flags);
+                printf("[HOME] Go-home aborted: FSR contact (0x%02X)\n", fsr_flags);
                 sleep_ms(20);
                 continue;
             }
-            emg_calibrate_prev = emg_calibrate_now;
+            if (!enc_fresh) {
+                go_home_active = false;
+                send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, 0u);
+                printf("[HOME] Go-home aborted: encoder stale\n");
+                sleep_ms(20);
+                continue;
+            }
 
-            // Safety priority: FSR stop > user stop-toggle > normal EMG command.
+            unsigned char home_cmd[5] = {MOTOR_CMD_STOP, MOTOR_CMD_STOP, MOTOR_CMD_STOP, MOTOR_CMD_STOP, MOTOR_CMD_STOP};
+            bool moving = build_go_home_cmds(g_encoder_count,
+                                             homing_open_count,
+                                             homing_close_count,
+                                             homing_home_count,
+                                             homing_calibrated,
+                                             home_cmd);
+            if (!moving) {
+                go_home_active = false;
+                send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, 0u);
+                printf("[HOME] Reached saved home\n");
+            } else {
+                send_packet_assist(speed_pct,
+                                   home_cmd[0], home_cmd[1], home_cmd[2],
+                                   home_cmd[3], home_cmd[4], 0u);
+            }
+            sleep_ms(20);
+            continue;
+        }
+        
+        // === ASSISTIVE MODE (PIN_MODE_EMG selected) ===
+        // Replaces EMG: detects per-finger user motion intent from encoder deltas
+        // and amplifies it independently per finger.
+        if (mode_emg) {
+            bool any_intent = update_assist_state(&assist_state, now_ms);
+            (void)any_intent;
+            bool motors_spinning = update_motor_motion_state(&motor_motion, now_ms);
+            printf("[ASSIST MODE] btn=%s motors=%s speed=%u%%",
+                   button_latched_started ? "STARTED" : "STOPPED",
+                   motors_spinning ? "SPINNING" : "STOPPED",
+                   (unsigned int)speed_pct);
+            for (int i = 0; i < 5; i++) {
+                printf(" M%d=%u", i, (unsigned int)assist_state.cmd[i]);
+            }
+            printf("\n");
+
+            // Safety priority: FSR > user stop > stale encoder > per-finger ROM + command.
             if (fsr_flags != 0) {
-                send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, fsr_flags);
+                assist_state.initialized = false;
+                send_packet_assist(0u,
+                    MOTOR_CMD_STOP, MOTOR_CMD_STOP, MOTOR_CMD_STOP,
+                    MOTOR_CMD_STOP, MOTOR_CMD_STOP, fsr_flags);
             } else if (!motors_enabled) {
-                send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, 0u);
-            } else if (has_rom && !enc_fresh) {
-                send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, 0u);
+                send_packet_assist(speed_pct,
+                    MOTOR_CMD_STOP, MOTOR_CMD_STOP, MOTOR_CMD_STOP,
+                    MOTOR_CMD_STOP, MOTOR_CMD_STOP, 0u);
+            } else if (!enc_fresh) {
+                assist_state.initialized = false;
+                send_packet_assist(speed_pct,
+                    MOTOR_CMD_STOP, MOTOR_CMD_STOP, MOTOR_CMD_STOP,
+                    MOTOR_CMD_STOP, MOTOR_CMD_STOP, 0u);
                 if ((now_ms - rom_last_block_print_ms) > 400u) {
                     rom_last_block_print_ms = now_ms;
-                    printf("[ROM] Encoder stale; blocking EMG motion until feedback recovers\n");
-                }
-            } else if (cmd_hits_rom_limit(motor_cmd, g_encoder_count, homing_open_count, homing_close_count, homing_calibrated)) {
-                send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, 0u);
-                if ((now_ms - rom_last_block_print_ms) > 400u) {
-                    rom_last_block_print_ms = now_ms;
-                    printf("[ROM] EMG command blocked at calibrated endpoint\n");
+                    printf("[ASSIST] Encoder stale; blocking motion\n");
                 }
             } else {
-                send_packet(MODE_EMG, motor_cmd, speed_pct, 0u, 0u);
+                // Apply per-finger ROM limits before sending.
+                unsigned char final_cmd[5];
+                for (int i = 0; i < 5; i++) {
+                    final_cmd[i] = assist_state.cmd[i];
+                    if (homing_calibrated[i]) {
+                        int count = g_encoder_count[i];
+                        if (final_cmd[i] == MOTOR_CMD_OPEN &&
+                            abs_i(count - homing_open_count[i]) <= ROM_LIMIT_TOL_COUNTS) {
+                            final_cmd[i] = MOTOR_CMD_STOP;
+                        } else if (final_cmd[i] == MOTOR_CMD_CLOSE &&
+                                   abs_i(count - homing_close_count[i]) <= ROM_LIMIT_TOL_COUNTS) {
+                            final_cmd[i] = MOTOR_CMD_STOP;
+                        }
+                    }
+                }
+                send_packet_assist(speed_pct,
+                    final_cmd[0], final_cmd[1], final_cmd[2],
+                    final_cmd[3], final_cmd[4], 0u);
             }
         }
         // === MANUAL MODE (GPIO 6 HIGH) ===
@@ -1026,9 +1414,64 @@ int main() {
             else if ((!open_pressed && !close_pressed) || (open_pressed && close_pressed)) {
                 manual_cmd = MOTOR_CMD_STOP;
             }
+            // Absolute open/close: single press drives to calibrated ROM endpoint, no hold required.
+            bool abs_open_level  = (gpio_get(ABSOLUTE_OPEN_PIN)  != 0);
+            bool abs_close_level = (gpio_get(ABSOLUTE_CLOSE_PIN) != 0);
+#if MANUAL_SWITCH_ACTIVE_LOW
+            bool abs_open_raw  = !abs_open_level;
+            bool abs_close_raw = !abs_close_level;
+#else
+            bool abs_open_raw  = abs_open_level;
+            bool abs_close_raw = abs_close_level;
+#endif
+            // Debounce (require 2 consecutive samples to confirm press).
+            if (abs_open_raw)  { if (abs_open_hits  < 2) abs_open_hits++;  } else { abs_open_hits  = 0; }
+            if (abs_close_raw) { if (abs_close_hits < 2) abs_close_hits++; } else { abs_close_hits = 0; }
+            bool abs_open_pressed  = (abs_open_hits  >= 2);
+            bool abs_close_pressed = (abs_close_hits >= 2);
+            // Rising edge on debounced signal triggers an absolute move.
+            if (abs_open_pressed && !abs_open_prev) {
+                if (has_rom && enc_fresh) {
+                    abs_move_target = 1u;
+                    printf("[ABS] Absolute OPEN started\n");
+                } else {
+                    printf("[ABS] Absolute OPEN ignored: no ROM calibration or stale encoder\n");
+                }
+            }
+            if (abs_close_pressed && !abs_close_prev) {
+                if (has_rom && enc_fresh) {
+                    abs_move_target = 2u;
+                    printf("[ABS] Absolute CLOSE started\n");
+                } else {
+                    printf("[ABS] Absolute CLOSE ignored: no ROM calibration or stale encoder\n");
+                }
+            }
+            abs_open_prev  = abs_open_pressed;
+            abs_close_prev = abs_close_pressed;
+
+            // Cancel active absolute move if encoder goes stale or ROM endpoint is reached.
+            if (abs_move_target == 1u) {
+                if (!enc_fresh) {
+                    abs_move_target = 0u;
+                    printf("[ABS] Absolute OPEN cancelled: encoder stale\n");
+                } else if (cmd_hits_rom_limit(MOTOR_CMD_OPEN, g_encoder_count, homing_open_count, homing_close_count, homing_calibrated)) {
+                    abs_move_target = 0u;
+                    printf("[ABS] Absolute OPEN reached endpoint\n");
+                }
+            } else if (abs_move_target == 2u) {
+                if (!enc_fresh) {
+                    abs_move_target = 0u;
+                    printf("[ABS] Absolute CLOSE cancelled: encoder stale\n");
+                } else if (cmd_hits_rom_limit(MOTOR_CMD_CLOSE, g_encoder_count, homing_open_count, homing_close_count, homing_calibrated)) {
+                    abs_move_target = 0u;
+                    printf("[ABS] Absolute CLOSE reached endpoint\n");
+                }
+            }
+
             bool motors_spinning = update_motor_motion_state(&motor_motion, now_ms);
-            printf("[MANUAL MODE] open=%u close=%u cmd=%u motors=%s speed=%u%%\n",
+            printf("[MANUAL MODE] open=%u close=%u abs=%u cmd=%u motors=%s speed=%u%%\n",
                    (unsigned int)open_pressed, (unsigned int)close_pressed,
+                   (unsigned int)abs_move_target,
                    (unsigned int)manual_cmd,
                    motors_spinning ? "SPINNING" : "STOPPED",
                    (unsigned int)speed_pct);
@@ -1040,9 +1483,9 @@ int main() {
                 }
             }
 
-            // Manual mode is hold-to-run: an active OPEN/CLOSE input directly drives motion.
-            // FSR and ROM limits still override with STOP.
+            // Priority: FSR safety stop > absolute move > hold-to-run.
             if (fsr_flags != 0) {
+                abs_move_target = 0u;  // FSR always cancels an in-progress absolute move.
                 send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, manual_inputs, fsr_flags);
                 printf("[UART] FSR contact (0x%02X) — Emergency stop\n", fsr_flags);
             //} else if (has_rom && !enc_fresh) {
