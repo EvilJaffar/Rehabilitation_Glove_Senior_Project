@@ -27,6 +27,9 @@ static const unsigned char ADS7830_CMD[8] = {
 #define FSR_THRESHOLD   50  // *Needs to be tuned when glove is built
 #define FSR_CONFIRM_SAMPLES 3   // require N consecutive FSR readings above threshold to confirm contact
 
+// EMG analog command path is currently unused (Assistive encoder intent replaces it).
+// Keep this block commented for quick restore later if needed.
+/*
 // EMG is on ADS7830 channel 5 (channels 0-4 are FSRs)
 // Use startup baseline calibration plus relative thresholds so the
 // EMG command logic works with a real (non-floating) sensor signal.
@@ -37,6 +40,7 @@ static const unsigned char ADS7830_CMD[8] = {
 #define EMG_CONFIRM_SAMPLES 2     // require N consecutive samples (lower = more sensitive, raise if false triggers)
 
 static int emg_baseline = 128;
+*/
 
 // ===== ASSISTIVE MODE TUNING =====
 // Encoder-driven intent detection replaces EMG. Adjust per patient/session.
@@ -57,7 +61,7 @@ static int emg_baseline = 128;
 // ===== PACKET PROTOCOL =====
 #define START_BYTE  0xAAu
 #define MODE_MANUAL 0x01u
-#define MODE_EMG    0x02u
+#define MODE_ASSIST 0x02u
 #define MODE_REHAB  0x03u
 #define MODE_HOMING 0x04u
 #define ENC_FB_START_BYTE 0xBBu
@@ -68,7 +72,7 @@ static int emg_baseline = 128;
 #define MOTOR_CMD_CLOSE   2u
 
 // ===== MODE CONTROL GPIO =====
-#define PIN_MODE_EMG      6    // HIGH = EMG mode
+#define PIN_MODE_ASSIST    6    // HIGH = Assistive mode
 #define PIN_MODE_REHAB    8    // HIGH = Rehab mode
 
 // 1: selected switch position pulls the GPIO LOW
@@ -78,7 +82,7 @@ static int emg_baseline = 128;
 // ===== USER INTERFACE GPIO =====
 #define SWITCH_OPEN_PIN         10  // Open the user's hand (Manual Mode only)
 #define SWITCH_CLOSE_PIN        11  // Close the user's hand (Manual Mode only)
-#define EMG_CALIBRATE_PIN       9   // Calibrate EMG baseline
+// #define EMG_CALIBRATE_PIN       9   // Calibrate EMG baseline (unused in current build)
 #define ROTARY_ENCODER_A_PIN    18   // Rotary encoder A (clock)
 #define ROTARY_ENCODER_B_PIN    17  // Rotary encoder B (data)
 #define GLOVE_START_PIN         16  // Rotary encoder push button (toggle run/stop)
@@ -98,9 +102,9 @@ static int emg_baseline = 128;
 // 0: switch is active-high (pressed reads 1)
 #define HOMING_SWITCH_ACTIVE_LOW 1
 
-#define CALIBRATE_DEBOUNCE_MS   250u   // Minimum ms between EMG calibration button presses (debounce)
-#define CALIBRATE_DURATION_MS  10000u  // Total duration (ms) of the EMG calibration window
-#define CALIBRATE_SAMPLE_MS       10u  // Interval (ms) between EMG samples during calibration
+// #define CALIBRATE_DEBOUNCE_MS   250u   // Minimum ms between EMG calibration button presses (debounce)
+// #define CALIBRATE_DURATION_MS  10000u  // Total duration (ms) of the EMG calibration window
+// #define CALIBRATE_SAMPLE_MS       10u  // Interval (ms) between EMG samples during calibration
 
 #define HOMING_DEBOUNCE_MS       250u  // Minimum ms between homing button presses (debounce)
 #define HOMING_SPEED_PCT          15u  // Motor speed percentage used during the homing sequence
@@ -125,6 +129,21 @@ static int emg_baseline = 128;
 #define SPEED_MIN_PCT             1u   // Minimum allowable motor speed (percent)
 #define SPEED_MAX_PCT           100u   // Maximum allowable motor speed (percent)
 #define SPEED_DEFAULT_PCT        40u   // Default motor speed on startup (percent)
+
+#define REHAB_PAUSE_MIN_MS       500u  // Minimum rehab pause between direction changes
+#define REHAB_PAUSE_MAX_MS      3000u  // Maximum rehab pause between direction changes
+#define REHAB_PAUSE_UNIT_MS      100u  // Packed unit size sent to Motor Pico in packet position byte
+#define REHAB_PAUSE_INVERT_WITH_SPEED 1  // 1: higher speed -> shorter pause, 0: higher speed -> longer pause
+
+#define UI_ASSIST_SPEED_RAMP_TICK_MS 20u  // Assistive: ramp update period for transmitted speed
+#define UI_ASSIST_ACCEL_STEP_PCT     4u   // Assistive: speed increment per ramp tick
+#define UI_ASSIST_DECEL_STEP_PCT     2u   // Assistive: speed decrement per ramp tick
+#define UI_MANUAL_SPEED_RAMP_TICK_MS 20u  // Manual: ramp update period for transmitted speed
+#define UI_MANUAL_ACCEL_STEP_PCT     4u   // Manual: speed increment per ramp tick
+#define UI_MANUAL_DECEL_STEP_PCT     2u   // Manual: speed decrement per ramp tick
+#define UI_REHAB_SPEED_RAMP_TICK_MS  20u  // Rehab: ramp update period for transmitted speed
+#define UI_REHAB_ACCEL_STEP_PCT      4u   // Rehab: speed increment per ramp tick
+#define UI_REHAB_DECEL_STEP_PCT      2u   // Rehab: speed decrement per ramp tick
 
 // 4-state gray-code lookup table for quadrature decoding.
 // Index = (prev_AB << 2) | curr_AB; value = direction step.
@@ -427,7 +446,7 @@ static void send_packet_assist(unsigned char speed_pct,
     unsigned char packed_lo = ((cmd3 & 0x03u) << 6) | ((cmd2 & 0x03u) << 4)
                             | ((cmd1 & 0x03u) << 2) |  (cmd0 & 0x03u);
     unsigned char packed_hi = (cmd4 & 0x03u);
-    send_packet(MODE_EMG, packed_hi, speed_pct, packed_lo, fsr_flags);
+    send_packet(MODE_ASSIST, packed_hi, speed_pct, packed_lo, fsr_flags);
 }
 
 // Evaluates per-finger encoder deltas to detect user motion intent for Assistive mode.
@@ -612,6 +631,76 @@ static unsigned char clamp_speed_pct(int speed) {
     return (unsigned char)speed;
 }
 
+static uint16_t clamp_rehab_pause_ms(int pause_ms) {
+    if (pause_ms < (int)REHAB_PAUSE_MIN_MS) return (uint16_t)REHAB_PAUSE_MIN_MS;
+    if (pause_ms > (int)REHAB_PAUSE_MAX_MS) return (uint16_t)REHAB_PAUSE_MAX_MS;
+    return (uint16_t)pause_ms;
+}
+
+// Maps speed to rehab pause linearly across configured min/max ranges.
+static uint16_t rehab_pause_from_speed_pct(unsigned char speed_pct) {
+    unsigned char s = speed_pct;
+    if (s < SPEED_MIN_PCT) s = SPEED_MIN_PCT;
+    if (s > SPEED_MAX_PCT) s = SPEED_MAX_PCT;
+
+    uint32_t speed_span = (uint32_t)(SPEED_MAX_PCT - SPEED_MIN_PCT);
+    uint32_t pause_span = (uint32_t)(REHAB_PAUSE_MAX_MS - REHAB_PAUSE_MIN_MS);
+    if (speed_span == 0u) {
+        return (uint16_t)REHAB_PAUSE_MIN_MS;
+    }
+
+    uint32_t speed_offset = (uint32_t)(s - SPEED_MIN_PCT);
+    uint32_t scaled = (speed_offset * pause_span + (speed_span / 2u)) / speed_span;
+
+#if REHAB_PAUSE_INVERT_WITH_SPEED
+    int pause_ms = (int)REHAB_PAUSE_MAX_MS - (int)scaled;
+#else
+    int pause_ms = (int)REHAB_PAUSE_MIN_MS + (int)scaled;
+#endif
+    return clamp_rehab_pause_ms(pause_ms);
+}
+
+// Slew-limits UI speed commands so acceleration/deceleration can be tuned on the UI Pico.
+static unsigned char apply_speed_ramp(unsigned char current_speed,
+                                      unsigned char target_speed,
+                                      bool motion_requested,
+                                      uint32_t now_ms,
+                                      uint32_t* last_update_ms,
+                                      uint32_t ramp_tick_ms,
+                                      unsigned char accel_step_pct,
+                                      unsigned char decel_step_pct) {
+    unsigned char desired = motion_requested ? target_speed : 0u;
+
+    if ((now_ms - *last_update_ms) < ramp_tick_ms) {
+        return current_speed;
+    }
+    *last_update_ms = now_ms;
+
+    if (current_speed < desired) {
+        unsigned int next = (unsigned int)current_speed + (unsigned int)accel_step_pct;
+        if (next > desired) next = desired;
+        return (unsigned char)next;
+    }
+
+    if (current_speed > desired) {
+        int next = (int)current_speed - (int)decel_step_pct;
+        if (next < (int)desired) next = (int)desired;
+        if (next < 0) next = 0;
+        return (unsigned char)next;
+    }
+
+    return current_speed;
+}
+
+static bool any_move_cmd(const unsigned char cmd[5]) {
+    for (int i = 0; i < 5; i++) {
+        if (cmd[i] == MOTOR_CMD_OPEN || cmd[i] == MOTOR_CMD_CLOSE) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Performs a quick EMG baseline calibration at startup (64 samples over ~320ms).
 // Captures the resting EMG signal so subsequent thresholds are relative to user baseline.
 //static void calibrate_emg_baseline() {
@@ -626,6 +715,7 @@ static unsigned char clamp_speed_pct(int speed) {
 //    if (emg_baseline > 245) emg_baseline = 245;
 //}
 
+/*
 // Performs a long on-demand EMG baseline calibration (10 seconds, user-triggered).
 // Samples EMG extensively and prints countdown to console. Used to re-center baseline
 // if user conditions change or signal needs adjustment.
@@ -715,6 +805,7 @@ unsigned char get_emg_cmd_filtered(unsigned char* raw_out, unsigned char* filt_o
     if (filt_out) *filt_out = (unsigned char)emg_filt;
     return cmd;
 }
+*/
 
 // ===== MAIN =====
 // Initializes hardware (I2C, UART, GPIO), loads saved homing calibration, and runs the main control loop.
@@ -754,31 +845,31 @@ int main() {
     gpio_set_function(PIN_TX, GPIO_FUNC_UART);
     gpio_set_function(PIN_RX, GPIO_FUNC_UART);
 
-        //calibrate_emg_baseline();
-        printf("EMG baseline=%d (close>%d open<%d)\n",
-            emg_baseline,
-            emg_baseline + EMG_CLOSE_DELTA,
-                emg_baseline - EMG_OPEN_DELTA);
+        // calibrate_emg_baseline();
+        // printf("EMG baseline=%d (close>%d open<%d)\n",
+        //     emg_baseline,
+        //     emg_baseline + EMG_CLOSE_DELTA,
+        //         emg_baseline - EMG_OPEN_DELTA);
 
     // GPIO mode inputs
     // GPIO mode inputs
-    gpio_init(PIN_MODE_EMG);
-    gpio_set_dir(PIN_MODE_EMG, GPIO_IN);
+    gpio_init(PIN_MODE_ASSIST);
+    gpio_set_dir(PIN_MODE_ASSIST, GPIO_IN);
     gpio_init(PIN_MODE_REHAB);
     gpio_set_dir(PIN_MODE_REHAB, GPIO_IN);
 
     #if MODE_SWITCH_ACTIVE_LOW
-    gpio_pull_up(PIN_MODE_EMG);
+    gpio_pull_up(PIN_MODE_ASSIST);
     gpio_pull_up(PIN_MODE_REHAB);
     #else
-    gpio_pull_down(PIN_MODE_EMG);
+    gpio_pull_down(PIN_MODE_ASSIST);
     gpio_pull_down(PIN_MODE_REHAB);
     #endif
 
-    // Calibrate input: set HIGH to re-capture a relaxed EMG baseline.
-    gpio_init(EMG_CALIBRATE_PIN);
-    gpio_set_dir(EMG_CALIBRATE_PIN, GPIO_IN);
-    gpio_pull_down(EMG_CALIBRATE_PIN);
+    // EMG baseline calibration button path is currently disabled.
+    // gpio_init(EMG_CALIBRATE_PIN);
+    // gpio_set_dir(EMG_CALIBRATE_PIN, GPIO_IN);
+    // gpio_pull_down(EMG_CALIBRATE_PIN);
 
     // Manual open/close inputs.
     gpio_init(SWITCH_OPEN_PIN);
@@ -831,13 +922,21 @@ int main() {
 
     printf("FSR + EMG + Manual Mode Ready\n");
 
-    bool emg_calibrate_prev = false;
-    uint32_t calibrate_last_ms = 0;
+    // bool emg_calibrate_prev = false;
+    // uint32_t calibrate_last_ms = 0;
     bool motors_enabled = false;
     bool button_prev = (gpio_get(GLOVE_START_PIN) == 0);
     bool button_latched_started = false;
     uint32_t button_last_ms = 0;
     unsigned char speed_pct = SPEED_DEFAULT_PCT;
+    uint16_t rehab_pause_ms = rehab_pause_from_speed_pct(speed_pct);
+    uint32_t speed_ramp_now_ms = to_ms_since_boot(get_absolute_time());
+    unsigned char ramped_speed_assist = 0u;
+    unsigned char ramped_speed_manual = 0u;
+    unsigned char ramped_speed_rehab = 0u;
+    uint32_t speed_ramp_assist_last_ms = speed_ramp_now_ms;
+    uint32_t speed_ramp_manual_last_ms = speed_ramp_now_ms;
+    uint32_t speed_ramp_rehab_last_ms = speed_ramp_now_ms;
     int enc_accum = 0;
     motor_motion_state_t motor_motion = {0};
     assist_state_t assist_state = {0};
@@ -912,41 +1011,41 @@ int main() {
         process_motor_feedback();
 
         unsigned char fsr_flags = 0;
-        bool emg_level_high   = (gpio_get(PIN_MODE_EMG) != 0);
+        bool assist_level_high = (gpio_get(PIN_MODE_ASSIST) != 0);
         bool rehab_level_high = (gpio_get(PIN_MODE_REHAB) != 0);
 
         #if MODE_SWITCH_ACTIVE_LOW
-        bool mode_emg_raw   = !emg_level_high;
+        bool mode_assist_raw = !assist_level_high;
         bool mode_rehab_raw = !rehab_level_high;
         #else
-        bool mode_emg_raw   = emg_level_high;
+        bool mode_assist_raw = assist_level_high;
         bool mode_rehab_raw = rehab_level_high;
         #endif
 
         // 2-pin mode selection:
-        // EMG only    -> EMG mode
-        // REHAB only  -> REHAB mode
+        // Assistive only -> Assistive mode
+        // REHAB only     -> REHAB mode
         // neither     -> MANUAL mode
         // both        -> invalid/fail-safe stop
         bool mode_default_active = false;
         unsigned char selected_mode = MODE_MANUAL;
 
-        if (mode_emg_raw && !mode_rehab_raw) {
-            selected_mode = MODE_EMG;
-        } else if (mode_rehab_raw && !mode_emg_raw) {
+        if (mode_assist_raw && !mode_rehab_raw) {
+            selected_mode = MODE_ASSIST;
+        } else if (mode_rehab_raw && !mode_assist_raw) {
             selected_mode = MODE_REHAB;
-        } else if (!mode_emg_raw && !mode_rehab_raw) {
+        } else if (!mode_assist_raw && !mode_rehab_raw) {
             selected_mode = MODE_MANUAL;
         } else {
             selected_mode = MODE_MANUAL;
             mode_default_active = true;   // both active at once -> fail-safe
         }
 
-        bool mode_emg = (!mode_default_active && (selected_mode == MODE_EMG));
+        bool mode_assist = (!mode_default_active && (selected_mode == MODE_ASSIST));
         bool mode_rehab = (!mode_default_active && (selected_mode == MODE_REHAB));
         bool mode_manual_effective = (!mode_default_active && (selected_mode == MODE_MANUAL));
         
-        bool emg_calibrate_now = gpio_get(EMG_CALIBRATE_PIN);
+        // bool emg_calibrate_now = gpio_get(EMG_CALIBRATE_PIN);
         // ROM calibration trigger is from HOMING_CALIBRATE_PIN.
         bool homing_cal_level_high_now = (gpio_get(HOMING_CALIBRATE_PIN) != 0);
         bool homing_cal_now =
@@ -1064,8 +1163,9 @@ int main() {
         homing_cal_prev = homing_cal_now;
 
         // === ROTARY ENCODER (EMG, Rehab, and Manual modes) ===
-        if ((mode_emg || mode_rehab || mode_manual_effective) && homing_state == HOMING_IDLE) {
+        if ((mode_assist || mode_rehab || mode_manual_effective) && homing_state == HOMING_IDLE) {
             int step_sum = 0;
+            bool rotary_button_down = (gpio_get(GLOVE_START_PIN) == 0);
             uint32_t ints = save_and_disable_interrupts();
             step_sum = g_rotary_step_accum;
             g_rotary_step_accum = 0;
@@ -1076,19 +1176,25 @@ int main() {
                 while (enc_accum >= 4) {
                     speed_pct = clamp_speed_pct((int)speed_pct + 1);
                     enc_accum -= 4;
-                    printf("[SPEED] %u%%\n", (unsigned int)speed_pct);
+                    rehab_pause_ms = rehab_pause_from_speed_pct(speed_pct);
+                    printf("[SPEED] %u%% [REHAB PAUSE] %ums\n",
+                           (unsigned int)speed_pct,
+                           (unsigned int)rehab_pause_ms);
                 }
                 while (enc_accum <= -4) {
                     speed_pct = clamp_speed_pct((int)speed_pct - 1);
                     enc_accum += 4;
-                    printf("[SPEED] %u%%\n", (unsigned int)speed_pct);
+                    rehab_pause_ms = rehab_pause_from_speed_pct(speed_pct);
+                    printf("[SPEED] %u%% [REHAB PAUSE] %ums\n",
+                           (unsigned int)speed_pct,
+                           (unsigned int)rehab_pause_ms);
                 }
             }
 
-            // Debounced push-button toggles motor run/stop only for EMG/Rehab.
+            // Debounced push-button toggles motor run/stop only for Assistive/Rehab.
             // Manual mode is hold-to-run from the OPEN/CLOSE inputs.
-            if (mode_emg || mode_rehab) {
-                bool button_now = (gpio_get(GLOVE_START_PIN) == 0);
+            if (mode_assist || mode_rehab) {
+                bool button_now = rotary_button_down;
                 if (button_now != button_prev && (now_ms - button_last_ms) > BUTTON_DEBOUNCE_MS) {
                     button_last_ms = now_ms;
                     button_prev = button_now;
@@ -1098,6 +1204,16 @@ int main() {
                         printf("[RUN BTN] TOGGLED -> %s\n", button_latched_started ? "STARTED" : "STOPPED");
                         printf("[RUN] Motors %s\n", motors_enabled ? "ENABLED" : "STOPPED");
                         if (!motors_enabled) {
+                            ramped_speed_assist = apply_speed_ramp(ramped_speed_assist, speed_pct, false, now_ms,
+                                                                   &speed_ramp_assist_last_ms,
+                                                                   UI_ASSIST_SPEED_RAMP_TICK_MS,
+                                                                   UI_ASSIST_ACCEL_STEP_PCT,
+                                                                   UI_ASSIST_DECEL_STEP_PCT);
+                            ramped_speed_rehab = apply_speed_ramp(ramped_speed_rehab, speed_pct, false, now_ms,
+                                                                  &speed_ramp_rehab_last_ms,
+                                                                  UI_REHAB_SPEED_RAMP_TICK_MS,
+                                                                  UI_REHAB_ACCEL_STEP_PCT,
+                                                                  UI_REHAB_DECEL_STEP_PCT);
                             // Push an immediate hard-stop frame on toggle-off.
                             send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, 0u);
                         }
@@ -1320,10 +1436,10 @@ int main() {
             continue;
         }
         
-        // === ASSISTIVE MODE (PIN_MODE_EMG selected) ===
-        // Replaces EMG: detects per-finger user motion intent from encoder deltas
+        // === ASSISTIVE MODE (PIN_MODE_ASSIST selected) ===
+        // Detects per-finger user motion intent from encoder deltas
         // and amplifies it independently per finger.
-        if (mode_emg) {
+        if (mode_assist) {
             bool any_intent = update_assist_state(&assist_state, now_ms);
             (void)any_intent;
             bool motors_spinning = update_motor_motion_state(&motor_motion, now_ms);
@@ -1339,16 +1455,31 @@ int main() {
             // Safety priority: FSR > user stop > stale encoder > per-finger ROM + command.
             if (fsr_flags != 0) {
                 assist_state.initialized = false;
+                ramped_speed_assist = apply_speed_ramp(ramped_speed_assist, speed_pct, false, now_ms,
+                                                       &speed_ramp_assist_last_ms,
+                                                       UI_ASSIST_SPEED_RAMP_TICK_MS,
+                                                       UI_ASSIST_ACCEL_STEP_PCT,
+                                                       UI_ASSIST_DECEL_STEP_PCT);
                 send_packet_assist(0u,
                     MOTOR_CMD_STOP, MOTOR_CMD_STOP, MOTOR_CMD_STOP,
                     MOTOR_CMD_STOP, MOTOR_CMD_STOP, fsr_flags);
             } else if (!motors_enabled) {
-                send_packet_assist(speed_pct,
+                ramped_speed_assist = apply_speed_ramp(ramped_speed_assist, speed_pct, false, now_ms,
+                                                       &speed_ramp_assist_last_ms,
+                                                       UI_ASSIST_SPEED_RAMP_TICK_MS,
+                                                       UI_ASSIST_ACCEL_STEP_PCT,
+                                                       UI_ASSIST_DECEL_STEP_PCT);
+                send_packet_assist(ramped_speed_assist,
                     MOTOR_CMD_STOP, MOTOR_CMD_STOP, MOTOR_CMD_STOP,
                     MOTOR_CMD_STOP, MOTOR_CMD_STOP, 0u);
             } else if (!enc_fresh) {
                 assist_state.initialized = false;
-                send_packet_assist(speed_pct,
+                ramped_speed_assist = apply_speed_ramp(ramped_speed_assist, speed_pct, false, now_ms,
+                                                       &speed_ramp_assist_last_ms,
+                                                       UI_ASSIST_SPEED_RAMP_TICK_MS,
+                                                       UI_ASSIST_ACCEL_STEP_PCT,
+                                                       UI_ASSIST_DECEL_STEP_PCT);
+                send_packet_assist(ramped_speed_assist,
                     MOTOR_CMD_STOP, MOTOR_CMD_STOP, MOTOR_CMD_STOP,
                     MOTOR_CMD_STOP, MOTOR_CMD_STOP, 0u);
                 if ((now_ms - rom_last_block_print_ms) > 400u) {
@@ -1371,7 +1502,13 @@ int main() {
                         }
                     }
                 }
-                send_packet_assist(speed_pct,
+                bool assist_motion = any_move_cmd(final_cmd);
+                ramped_speed_assist = apply_speed_ramp(ramped_speed_assist, speed_pct, assist_motion, now_ms,
+                                                       &speed_ramp_assist_last_ms,
+                                                       UI_ASSIST_SPEED_RAMP_TICK_MS,
+                                                       UI_ASSIST_ACCEL_STEP_PCT,
+                                                       UI_ASSIST_DECEL_STEP_PCT);
+                send_packet_assist(ramped_speed_assist,
                     final_cmd[0], final_cmd[1], final_cmd[2],
                     final_cmd[3], final_cmd[4], 0u);
             }
@@ -1486,6 +1623,11 @@ int main() {
             // Priority: FSR safety stop > absolute move > hold-to-run.
             if (fsr_flags != 0) {
                 abs_move_target = 0u;  // FSR always cancels an in-progress absolute move.
+                ramped_speed_manual = apply_speed_ramp(ramped_speed_manual, speed_pct, false, now_ms,
+                                                       &speed_ramp_manual_last_ms,
+                                                       UI_MANUAL_SPEED_RAMP_TICK_MS,
+                                                       UI_MANUAL_ACCEL_STEP_PCT,
+                                                       UI_MANUAL_DECEL_STEP_PCT);
                 send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, manual_inputs, fsr_flags);
                 printf("[UART] FSR contact (0x%02X) — Emergency stop\n", fsr_flags);
             //} else if (has_rom && !enc_fresh) {
@@ -1503,32 +1645,64 @@ int main() {
             //    }
             } else if (manual_cmd == MOTOR_CMD_STOP) {
                 // In manual mode, no active open/close input means hard stop.
+                ramped_speed_manual = apply_speed_ramp(ramped_speed_manual, speed_pct, false, now_ms,
+                                                       &speed_ramp_manual_last_ms,
+                                                       UI_MANUAL_SPEED_RAMP_TICK_MS,
+                                                       UI_MANUAL_ACCEL_STEP_PCT,
+                                                       UI_MANUAL_DECEL_STEP_PCT);
                 send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, manual_inputs, 0u);
             } else {
                 // Unified packet format: mode determines command semantics.
-                send_packet(MODE_MANUAL, manual_cmd, speed_pct, manual_inputs, 0u);
+                ramped_speed_manual = apply_speed_ramp(ramped_speed_manual, speed_pct, true, now_ms,
+                                                       &speed_ramp_manual_last_ms,
+                                                       UI_MANUAL_SPEED_RAMP_TICK_MS,
+                                                       UI_MANUAL_ACCEL_STEP_PCT,
+                                                       UI_MANUAL_DECEL_STEP_PCT);
+                send_packet(MODE_MANUAL, manual_cmd, ramped_speed_manual, manual_inputs, 0u);
             }
         }
         // === REHAB MODE (GPIO 8 HIGH) ===
         else if (mode_rehab) {
             bool motors_spinning = update_motor_motion_state(&motor_motion, now_ms);
-            printf("[REHAB MODE] btn=%s motors=%s speed=%u%%\n",
+            printf("[REHAB MODE] btn=%s motors=%s speed=%u%% pause=%ums\n",
                      button_latched_started ? "STARTED" : "STOPPED",
                    motors_spinning ? "SPINNING" : "STOPPED",
-                   (unsigned int)speed_pct);
+                   (unsigned int)speed_pct,
+                   (unsigned int)rehab_pause_ms);
+            unsigned char rehab_pause_units = (unsigned char)(rehab_pause_ms / REHAB_PAUSE_UNIT_MS);
             // Motor Pico handles the timed open/close cycle in this mode.
             // UI Pico still sends speed and global run/stop intent.
             if (fsr_flags != 0) {
-                send_packet(MODE_REHAB, MOTOR_CMD_STOP, 0u, 0u, fsr_flags);
+                ramped_speed_rehab = apply_speed_ramp(ramped_speed_rehab, speed_pct, false, now_ms,
+                                                      &speed_ramp_rehab_last_ms,
+                                                      UI_REHAB_SPEED_RAMP_TICK_MS,
+                                                      UI_REHAB_ACCEL_STEP_PCT,
+                                                      UI_REHAB_DECEL_STEP_PCT);
+                send_packet(MODE_REHAB, MOTOR_CMD_STOP, 0u, rehab_pause_units, fsr_flags);
             } else if (!motors_enabled) {
-                send_packet(MODE_REHAB, MOTOR_CMD_STOP, 0u, 0u, 0u);
+                ramped_speed_rehab = apply_speed_ramp(ramped_speed_rehab, speed_pct, false, now_ms,
+                                                      &speed_ramp_rehab_last_ms,
+                                                      UI_REHAB_SPEED_RAMP_TICK_MS,
+                                                      UI_REHAB_ACCEL_STEP_PCT,
+                                                      UI_REHAB_DECEL_STEP_PCT);
+                send_packet(MODE_REHAB, MOTOR_CMD_STOP, 0u, rehab_pause_units, 0u);
             } else if (has_rom && !enc_fresh) {
-                send_packet(MODE_REHAB, MOTOR_CMD_STOP, 0u, 0u, 0u);
+                ramped_speed_rehab = apply_speed_ramp(ramped_speed_rehab, speed_pct, false, now_ms,
+                                                      &speed_ramp_rehab_last_ms,
+                                                      UI_REHAB_SPEED_RAMP_TICK_MS,
+                                                      UI_REHAB_ACCEL_STEP_PCT,
+                                                      UI_REHAB_DECEL_STEP_PCT);
+                send_packet(MODE_REHAB, MOTOR_CMD_STOP, 0u, rehab_pause_units, 0u);
                 if ((now_ms - rom_last_block_print_ms) > 400u) {
                     rom_last_block_print_ms = now_ms;
                     printf("[ROM] Encoder stale; blocking rehab motion until feedback recovers\n");
                 }
             } else if (rehab_hits_rom_edge(g_encoder_count, homing_open_count, homing_close_count, homing_calibrated)) {
+                ramped_speed_rehab = apply_speed_ramp(ramped_speed_rehab, speed_pct, false, now_ms,
+                                                      &speed_ramp_rehab_last_ms,
+                                                      UI_REHAB_SPEED_RAMP_TICK_MS,
+                                                      UI_REHAB_ACCEL_STEP_PCT,
+                                                      UI_REHAB_DECEL_STEP_PCT);
                 send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, 0u);
                 if ((now_ms - rom_last_block_print_ms) > 400u) {
                     rom_last_block_print_ms = now_ms;
@@ -1536,11 +1710,31 @@ int main() {
                 }
             } else {
                 // Explicit rehab run token: Motor Pico only cycles when cmd == MOTOR_CMD_OPEN.
-                send_packet(MODE_REHAB, MOTOR_CMD_OPEN, speed_pct, 0u, 0u);
+                ramped_speed_rehab = apply_speed_ramp(ramped_speed_rehab, speed_pct, true, now_ms,
+                                                      &speed_ramp_rehab_last_ms,
+                                                      UI_REHAB_SPEED_RAMP_TICK_MS,
+                                                      UI_REHAB_ACCEL_STEP_PCT,
+                                                      UI_REHAB_DECEL_STEP_PCT);
+                send_packet(MODE_REHAB, MOTOR_CMD_OPEN, ramped_speed_rehab, rehab_pause_units, 0u);
             }
         }
         // === DEFAULT MODE (fail-safe stop) ===
         else {
+            ramped_speed_assist = apply_speed_ramp(ramped_speed_assist, speed_pct, false, now_ms,
+                                                   &speed_ramp_assist_last_ms,
+                                                   UI_ASSIST_SPEED_RAMP_TICK_MS,
+                                                   UI_ASSIST_ACCEL_STEP_PCT,
+                                                   UI_ASSIST_DECEL_STEP_PCT);
+            ramped_speed_manual = apply_speed_ramp(ramped_speed_manual, speed_pct, false, now_ms,
+                                                   &speed_ramp_manual_last_ms,
+                                                   UI_MANUAL_SPEED_RAMP_TICK_MS,
+                                                   UI_MANUAL_ACCEL_STEP_PCT,
+                                                   UI_MANUAL_DECEL_STEP_PCT);
+            ramped_speed_rehab = apply_speed_ramp(ramped_speed_rehab, speed_pct, false, now_ms,
+                                                  &speed_ramp_rehab_last_ms,
+                                                  UI_REHAB_SPEED_RAMP_TICK_MS,
+                                                  UI_REHAB_ACCEL_STEP_PCT,
+                                                  UI_REHAB_DECEL_STEP_PCT);
             send_packet(MODE_MANUAL, MOTOR_CMD_STOP, 0u, 0u, fsr_flags);
         }
 

@@ -7,13 +7,13 @@ stateDiagram-v2
     state "UI Pico" as UI {
         UI_IDLE --> UI_HOMING_OPENING: homing_armed && rising(HOMING_PIN)\n&& debounce && homing_state==IDLE
 
-        UI_IDLE --> UI_MODE_EMG: mode_emg && homing_state==IDLE
+        UI_IDLE --> UI_MODE_ASSIST: mode_assist && homing_state==IDLE
         UI_IDLE --> UI_MODE_MANUAL: mode_manual && homing_state==IDLE
         UI_IDLE --> UI_MODE_REHAB: mode_rehab && homing_state==IDLE
         UI_IDLE --> UI_SAFE_OFF: no mode selected
 
-        UI_MODE_EMG --> UI_SAFE_OFF: fsr_flags!=0 || !motors_enabled ||\n(has_rom && !enc_fresh) || hits_rom_limit
-        UI_MODE_EMG --> UI_MODE_EMG: send MODE_EMG + motor_cmd + speed
+        UI_MODE_ASSIST --> UI_SAFE_OFF: fsr_flags!=0 || !motors_enabled ||\n(has_rom && !enc_fresh) || hits_rom_limit
+        UI_MODE_ASSIST --> UI_MODE_ASSIST: send MODE_ASSIST + motor_cmd + speed
 
         UI_MODE_MANUAL --> UI_SAFE_OFF: fsr_flags!=0 || !motors_enabled ||\n(has_rom && !enc_fresh) || hits_rom_limit || manual_cmd==STOP
         UI_MODE_MANUAL --> UI_MODE_MANUAL: send MODE_RUN + manual_cmd + speed

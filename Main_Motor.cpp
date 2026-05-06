@@ -23,7 +23,7 @@ typedef unsigned int uint;
 #define START_BYTE      0xAAu   // UI → Motor command packet
 #define ENC_START_BYTE  0xBBu   // Motor → UI encoder packet
 #define MODE_MANUAL     0x01u
-#define MODE_EMG        0x02u
+#define MODE_ASSIST     0x02u
 #define MODE_REHAB      0x03u
 #define MODE_HOMING     0x04u
 
@@ -68,9 +68,29 @@ static uint32_t g_last_valid_pkt_ms = 0u;  // 0 = stale at boot; motors stop unt
 static const uint32_t UART_CMD_TIMEOUT_MS = 150u;
 
 // ===== REHAB MODE STATE =====
-static const uint32_t REHAB_DWELL_MS = 1200u;
+static const uint32_t REHAB_RUN_MS = 1200u;       // Time to run in one direction before slowing down.
+static const uint32_t REHAB_PAUSE_DEFAULT_MS = 734u; // Default stop time between direction changes.
+static const uint32_t REHAB_PAUSE_MIN_MS = 500u;
+static const uint32_t REHAB_PAUSE_MAX_MS = 3000u;
+static const uint32_t REHAB_PAUSE_UNIT_MS = 100u;     // UI packs pause duration in 100ms units.
+static const uint32_t REHAB_RAMP_TICK_MS = 10u;   // Ramp update period.
+static const unsigned char REHAB_ACCEL_STEP_PCT = 2u; // +speed step per ramp tick.
+static const unsigned char REHAB_DECEL_STEP_PCT = 2u; // -speed step per ramp tick.
+
+typedef enum {
+    REHAB_PHASE_RAMP_UP = 0,
+    REHAB_PHASE_RUN,
+    REHAB_PHASE_RAMP_DOWN,
+    REHAB_PHASE_PAUSE
+} rehab_phase_t;
+
+static rehab_phase_t rehab_phase = REHAB_PHASE_RAMP_UP;
 static bool rehab_closing = true;
-static uint32_t rehab_last_toggle_ms = 0u;
+static bool rehab_active_prev = false;
+static uint32_t rehab_phase_start_ms = 0u;
+static uint32_t rehab_speed_step_last_ms = 0u;
+static unsigned char rehab_ramped_speed_pct = 0u;
+static uint32_t rehab_pause_ms = REHAB_PAUSE_DEFAULT_MS;
 
 // ===== PWM INIT =====
 static bool slice_initialized[8] = {false};  // Track which slices have been initialized
@@ -103,51 +123,45 @@ static unsigned int speed_pct_to_pwm(unsigned char pct) {
     return (unsigned int)(((unsigned int)pct * PWM_TOP) / 100u);
 }
 
-// ===== MOTOR CONTROL =====
-void motors_forward() {
-    // EN/IN CW drive: IN sets CW direction, EN gets PWM speed.
-    unsigned int level = speed_pct_to_pwm(g_speed_pct);
-    printf("Forward: level=%u ", level);
+static void motors_drive_all(unsigned char dir_level, unsigned char speed_pct, const char* tag) {
+    unsigned int level = speed_pct_to_pwm(speed_pct);
+    printf("%s: level=%u ", tag, level);
     for (int i = 0; i < NUM_MOTORS; i++) {
-        gpio_put(MOTOR_IN_PIN[i], DIR_CW_LEVEL);
-        
+        gpio_put(MOTOR_IN_PIN[i], dir_level);
+
         // Re-assert PWM function on EN pin (may have been switched to GPIO by motors_stop).
         gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_PWM);
         uint slice = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
         pwm_set_enabled(slice, true);
-        
-        // Restore proper PWM wrap for problematic motors
+
+        // Restore proper PWM wrap for problematic motors.
         if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20) {
             pwm_set_wrap(slice, PWM_TOP);
         }
-        
+
         pwm_set_gpio_level(MOTOR_EN_PIN[i], level);
         printf("M%d(GPIO%d) ", i, MOTOR_EN_PIN[i]);
     }
-    printf("speed=%u%%\n", (unsigned int)g_speed_pct);
+    printf("speed=%u%%\n", (unsigned int)speed_pct);
+}
+
+// ===== MOTOR CONTROL =====
+void motors_forward() {
+    // EN/IN CW drive: IN sets CW direction, EN gets PWM speed.
+    motors_drive_all(DIR_CW_LEVEL, g_speed_pct, "Forward");
 }
 
 void motors_reverse() {
     // EN/IN CCW drive: IN sets CCW direction, EN gets PWM speed.
-    unsigned int level = speed_pct_to_pwm(g_speed_pct);
-    printf("Reverse: level=%u ", level);
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        gpio_put(MOTOR_IN_PIN[i], DIR_CCW_LEVEL);
-        
-        // Re-assert PWM function on EN pin (may have been switched to GPIO by motors_stop).
-        gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_PWM);
-        uint slice = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
-        pwm_set_enabled(slice, true);
-        
-        // Restore proper PWM wrap for problematic motors
-        if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20) {
-            pwm_set_wrap(slice, PWM_TOP);
-        }
-        
-        pwm_set_gpio_level(MOTOR_EN_PIN[i], level);
-        printf("M%d(GPIO%d) ", i, MOTOR_EN_PIN[i]);
-    }
-    printf("speed=%u%%\n", (unsigned int)g_speed_pct);
+    motors_drive_all(DIR_CCW_LEVEL, g_speed_pct, "Reverse");
+}
+
+static void motors_forward_speed(unsigned char speed_pct) {
+    motors_drive_all(DIR_CW_LEVEL, speed_pct, "RehabFwd");
+}
+
+static void motors_reverse_speed(unsigned char speed_pct) {
+    motors_drive_all(DIR_CCW_LEVEL, speed_pct, "RehabRev");
 }
 
 void motors_stop() {
@@ -275,13 +289,27 @@ void process_uart(void) {
             g_position = rx_buf[3];
             g_motor_cmd = rx_buf[4];
             g_fsr_flags = rx_buf[5];
+
+            if (g_uart_mode == MODE_REHAB) {
+                uint32_t pause_ms = (uint32_t)g_position * REHAB_PAUSE_UNIT_MS;
+                if (pause_ms == 0u) {
+                    rehab_pause_ms = REHAB_PAUSE_DEFAULT_MS;
+                } else {
+                    if (pause_ms < REHAB_PAUSE_MIN_MS) pause_ms = REHAB_PAUSE_MIN_MS;
+                    if (pause_ms > REHAB_PAUSE_MAX_MS) pause_ms = REHAB_PAUSE_MAX_MS;
+                    rehab_pause_ms = pause_ms;
+                }
+            }
+
             g_last_valid_pkt_ms = to_ms_since_boot(get_absolute_time());
 
-                        printf("[UART] mode=%u speed=%u%% motor_cmd=%u fsr=0x%02X\n",
+                        printf("[UART] mode=%u speed=%u%% pos=%u motor_cmd=%u fsr=0x%02X rehab_pause=%lu\n",
                    (unsigned int)g_uart_mode,
                    (unsigned int)g_speed_pct,
+                   (unsigned int)g_position,
                    (unsigned int)g_motor_cmd,
-                   (unsigned int)g_fsr_flags);
+                   (unsigned int)g_fsr_flags,
+                   (unsigned long)rehab_pause_ms);
         }
     }
 }
@@ -338,9 +366,9 @@ int main() {
     // g_last_valid_pkt_ms intentionally left at 0 so cmd_stale fires
     // immediately on boot. Motors stay stopped until the first valid
     // UI packet is received — no preset values take effect.
-    // rehab_last_toggle_ms is set once a valid packet arrives (see process_uart),
-    // but initialize it to a large offset so REHAB dwell starts fresh on first entry.
-    rehab_last_toggle_ms = to_ms_since_boot(get_absolute_time());
+    uint32_t boot_now_ms = to_ms_since_boot(get_absolute_time());
+    rehab_phase_start_ms = boot_now_ms;
+    rehab_speed_step_last_ms = boot_now_ms;
 
     while (true) {
         // Always consume newest UI command before making motor decision.
@@ -355,6 +383,12 @@ int main() {
 
         // Motor action driven by explicit mode + fresh UART command stream.
         bool cmd_stale = ((now_ms - g_last_valid_pkt_ms) > UART_CMD_TIMEOUT_MS);
+        bool rehab_run_cmd = (!cmd_stale && g_fsr_flags == 0u && g_uart_mode == MODE_REHAB && g_motor_cmd == MOTOR_CMD_OPEN);
+        if (!rehab_run_cmd) {
+            rehab_active_prev = false;
+            rehab_phase = REHAB_PHASE_RAMP_UP;
+            rehab_ramped_speed_pct = 0u;
+        }
 
         if (cmd_stale) {
             motors_stop();
@@ -383,7 +417,7 @@ int main() {
             } else {
                 motors_stop();
             }
-        } else if (g_uart_mode == MODE_EMG) {
+        } else if (g_uart_mode == MODE_ASSIST) {
             // Assistive mode: per-finger packed commands from UI Pico.
             // byte[3] (g_position) packs M0-M3 as 2-bit fields: M0=bits[1:0], M1=bits[3:2], M2=bits[5:4], M3=bits[7:6]
             // byte[4] (g_motor_cmd) packs M4 as bits[1:0]
@@ -401,16 +435,76 @@ int main() {
             }
         } else if (g_uart_mode == MODE_REHAB) {
             // UI Pico sends MODE_REHAB with an explicit run token in motor_cmd.
-            // Only run the timed cycle when cmd == MOTOR_CMD_OPEN.
+            // Only run the smooth cycle when cmd == MOTOR_CMD_OPEN.
             if (g_motor_cmd == MOTOR_CMD_OPEN) {
-                if ((now_ms - rehab_last_toggle_ms) >= REHAB_DWELL_MS) {
-                    rehab_closing = !rehab_closing;
-                    rehab_last_toggle_ms = now_ms;
-                    printf("[REHAB] %s\n", rehab_closing ? "CLOSE" : "OPEN");
+                if (!rehab_active_prev) {
+                    rehab_active_prev = true;
+                    rehab_phase = REHAB_PHASE_RAMP_UP;
+                    rehab_phase_start_ms = now_ms;
+                    rehab_speed_step_last_ms = now_ms;
+                    rehab_ramped_speed_pct = 0u;
+                    printf("[REHAB] START -> %s\n", rehab_closing ? "CLOSE" : "OPEN");
                 }
-                if (rehab_closing) motors_reverse();
-                else               motors_forward();
+
+                unsigned char target_speed_pct = g_speed_pct;
+                bool step_due = ((now_ms - rehab_speed_step_last_ms) >= REHAB_RAMP_TICK_MS);
+
+                if (rehab_phase == REHAB_PHASE_RAMP_UP) {
+                    if (step_due) {
+                        rehab_speed_step_last_ms = now_ms;
+                        unsigned int next = (unsigned int)rehab_ramped_speed_pct + (unsigned int)REHAB_ACCEL_STEP_PCT;
+                        if (next > target_speed_pct) next = target_speed_pct;
+                        rehab_ramped_speed_pct = (unsigned char)next;
+                    }
+                    if (rehab_closing) motors_reverse_speed(rehab_ramped_speed_pct);
+                    else               motors_forward_speed(rehab_ramped_speed_pct);
+
+                    if (rehab_ramped_speed_pct >= target_speed_pct) {
+                        rehab_phase = REHAB_PHASE_RUN;
+                        rehab_phase_start_ms = now_ms;
+                        printf("[REHAB] RUN %s\n", rehab_closing ? "CLOSE" : "OPEN");
+                    }
+                } else if (rehab_phase == REHAB_PHASE_RUN) {
+                    rehab_ramped_speed_pct = target_speed_pct;
+                    if (rehab_closing) motors_reverse_speed(rehab_ramped_speed_pct);
+                    else               motors_forward_speed(rehab_ramped_speed_pct);
+
+                    if ((now_ms - rehab_phase_start_ms) >= REHAB_RUN_MS) {
+                        rehab_phase = REHAB_PHASE_RAMP_DOWN;
+                        rehab_speed_step_last_ms = now_ms;
+                        printf("[REHAB] RAMP DOWN\n");
+                    }
+                } else if (rehab_phase == REHAB_PHASE_RAMP_DOWN) {
+                    if (step_due) {
+                        rehab_speed_step_last_ms = now_ms;
+                        int next = (int)rehab_ramped_speed_pct - (int)REHAB_DECEL_STEP_PCT;
+                        if (next < 0) next = 0;
+                        rehab_ramped_speed_pct = (unsigned char)next;
+                    }
+
+                    if (rehab_ramped_speed_pct > 0u) {
+                        if (rehab_closing) motors_reverse_speed(rehab_ramped_speed_pct);
+                        else               motors_forward_speed(rehab_ramped_speed_pct);
+                    } else {
+                        motors_stop();
+                        rehab_phase = REHAB_PHASE_PAUSE;
+                        rehab_phase_start_ms = now_ms;
+                        printf("[REHAB] PAUSE %lums\n", (unsigned long)rehab_pause_ms);
+                    }
+                } else { // REHAB_PHASE_PAUSE
+                    motors_stop();
+                    if ((now_ms - rehab_phase_start_ms) >= rehab_pause_ms) {
+                        rehab_closing = !rehab_closing;
+                        rehab_phase = REHAB_PHASE_RAMP_UP;
+                        rehab_phase_start_ms = now_ms;
+                        rehab_speed_step_last_ms = now_ms;
+                        printf("[REHAB] REVERSE -> %s\n", rehab_closing ? "CLOSE" : "OPEN");
+                    }
+                }
             } else {
+                rehab_active_prev = false;
+                rehab_phase = REHAB_PHASE_RAMP_UP;
+                rehab_ramped_speed_pct = 0u;
                 motors_stop();
             }
         } else {
