@@ -1,0 +1,87 @@
+stateDiagram-v2
+    direction LR
+
+    [*] --> UI_BOOT
+    UI_BOOT --> UI_IDLE: init GPIO/UART/I2C\nload homing flash
+
+    state "UI Pico" as UI {
+        UI_IDLE --> UI_HOMING_OPENING: homing_armed && rising(HOMING_PIN)\n&& debounce && homing_state==IDLE
+
+        UI_IDLE --> UI_MODE_ASSIST: mode_assist && homing_state==IDLE
+        UI_IDLE --> UI_MODE_MANUAL: mode_manual && homing_state==IDLE
+        UI_IDLE --> UI_MODE_REHAB: mode_rehab && homing_state==IDLE
+        UI_IDLE --> UI_SAFE_OFF: no mode selected
+
+        UI_MODE_ASSIST --> UI_SAFE_OFF: fsr_flags!=0 || !motors_enabled ||\n(has_rom && !enc_fresh) || hits_rom_limit
+        UI_MODE_ASSIST --> UI_MODE_ASSIST: send MODE_ASSIST + motor_cmd + speed
+
+        UI_MODE_MANUAL --> UI_SAFE_OFF: fsr_flags!=0 || !motors_enabled ||\n(has_rom && !enc_fresh) || hits_rom_limit || manual_cmd==STOP
+        UI_MODE_MANUAL --> UI_MODE_MANUAL: send MODE_RUN + manual_cmd + speed
+
+        UI_MODE_REHAB --> UI_SAFE_OFF: fsr_flags!=0 || !motors_enabled ||\n(has_rom && !enc_fresh) || rehab_hits_rom_edge
+        UI_MODE_REHAB --> UI_MODE_REHAB: send MODE_REHAB + speed
+
+        UI_SAFE_OFF --> UI_IDLE: next loop
+
+        state "Homing Sub-FSM" as HOMING {
+            [*] --> H_OPEN
+            H_OPEN --> H_FAIL: !encoder_feedback_fresh || phase_timeout
+            H_OPEN --> H_OPEN: send MODE_HOMING + OPEN
+            H_OPEN --> H_CLOSE: all_open_done
+
+            H_CLOSE --> H_FAIL: !encoder_feedback_fresh || phase_timeout
+            H_CLOSE --> H_CLOSE: send MODE_HOMING + CLOSE
+            H_CLOSE --> H_RETURN: all_fsr_confirmed\nsave homing to flash
+
+            H_RETURN --> H_FAIL: !encoder_feedback_fresh || phase_timeout
+            H_RETURN --> H_RETURN: send MODE_HOMING + OPEN (slow)
+            H_RETURN --> H_COMPLETE: all_at_home\nsend MODE_OFF + STOP
+
+            H_COMPLETE --> [*]: report + set motors_enabled=false
+            H_FAIL --> [*]: send MODE_OFF + STOP\nset motors_enabled=false
+        }
+
+        UI_HOMING_OPENING --> UI_HOMING_CLOSING: all_open_done
+        UI_HOMING_OPENING --> UI_HOMING_FAILED: stale/timeout
+        UI_HOMING_CLOSING --> UI_HOMING_RETURN: all_fsr_confirmed
+        UI_HOMING_CLOSING --> UI_HOMING_FAILED: stale/timeout
+        UI_HOMING_RETURN --> UI_HOMING_COMPLETE: all_at_home
+        UI_HOMING_RETURN --> UI_HOMING_FAILED: stale/timeout
+        UI_HOMING_COMPLETE --> UI_IDLE
+        UI_HOMING_FAILED --> UI_IDLE
+
+        UI_IDLE --> UI_IDLE: start button edge\ntoggles motors_enabled
+    }
+
+    state "Motor Pico" as MOTOR {
+        [*] --> M_LOOP
+        M_LOOP --> M_STOP: cmd_stale (>150ms)
+        M_LOOP --> M_STOP: mode==OFF || fsr_flags!=0
+
+        M_LOOP --> M_HOMING: mode==HOMING
+        M_HOMING --> M_FWD: cmd==OPEN
+        M_HOMING --> M_REV: cmd==CLOSE
+        M_HOMING --> M_STOP: cmd==STOP/other
+
+        M_LOOP --> M_RUN: mode==RUN
+        M_RUN --> M_FWD: cmd==OPEN
+        M_RUN --> M_REV: cmd==CLOSE
+        M_RUN --> M_STOP: cmd==STOP/other
+
+        M_LOOP --> M_EMG: mode==EMG
+        M_EMG --> M_FWD: cmd==OPEN
+        M_EMG --> M_REV: cmd==CLOSE
+        M_EMG --> M_STOP: cmd==STOP/other
+
+        M_LOOP --> M_REHAB: mode==REHAB
+        M_REHAB --> M_REHAB: toggle direction every REHAB_DWELL_MS
+        M_REHAB --> M_FWD: rehab_closing == false
+        M_REHAB --> M_REV: rehab_closing == true
+
+        M_FWD --> M_LOOP
+        M_REV --> M_LOOP
+        M_STOP --> M_LOOP
+    }
+
+    UI --> MOTOR: UART control packet\n[mode, speed, cmd, fsr, checksum]
+    MOTOR --> UI: UART feedback packet\nencoder counts every ~50ms

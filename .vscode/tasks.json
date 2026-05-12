@@ -18,10 +18,12 @@
             }
         },
         {
-            "label": "Run Project",
+            "label": "Run Project (Flash)",
             "type": "process",
-            "command": "${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool",
+            "command": "flatpak-spawn",
             "args": [
+                "--host",
+                "${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool",
                 "load",
                 "${workspaceFolder}/build/${fileBasenameNoExtension}.uf2",
                 "-fx"
@@ -36,12 +38,23 @@
             }
         },
         {
-            "label": "Run Motor_TB",
+            "label": "Run Project",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Run Project (Flash)",
+                "Monitor Main_UI Serial"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Main_Motor",
             "type": "process",
-            "command": "${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool",
+            "command": "flatpak-spawn",
             "args": [
+                "--host",
+                "${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool",
                 "load",
-                "${workspaceFolder}/build/Motor_TB.uf2",
+                "${workspaceFolder}/build/Main_Motor.uf2",
                 "-fx"
             ],
             "presentation": {
@@ -54,12 +67,14 @@
             }
         },
         {
-            "label": "Run ADC_TB",
+            "label": "Run Main_UI",
             "type": "process",
-            "command": "${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool",
+            "command": "flatpak-spawn",
             "args": [
+                "--host",
+                "${env:HOME}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool",
                 "load",
-                "${workspaceFolder}/build/ADC_TB.uf2",
+                "${workspaceFolder}/build/Main_UI.uf2",
                 "-fx"
             ],
             "presentation": {
@@ -70,6 +85,56 @@
             "windows": {
                 "command": "${env:USERPROFILE}/.pico-sdk/picotool/2.2.0-a4/picotool/picotool.exe"
             }
+        },
+        {
+            "label": "List Serial Ports",
+            "type": "process",
+            "command": "flatpak-spawn",
+            "args": [
+                "--host",
+                "bash",
+                "-lc",
+                "ls -l /dev/serial/by-id 2>/dev/null || true; ls -l /dev/ttyACM* 2>/dev/null || true"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Monitor Main_UI Serial",
+            "type": "process",
+            "command": "flatpak-spawn",
+            "args": [
+                "--host",
+                "bash",
+                "-lc",
+                "echo \"Auto-monitor enabled (Ctrl+C to stop)\"; while true; do DEV=$(ls -1 /dev/serial/by-id/usb-Raspberry_Pi_Pico_*-if00 2>/dev/null | head -n1); if [ -z \"$DEV\" ]; then DEV=/dev/ttyACM0; fi; if [ ! -e \"$DEV\" ]; then echo \"[wait] Serial device not present\"; sleep 1; continue; fi; echo \"[connect] $DEV\"; stty -F \"$DEV\" 115200 -echo -echoe -echok -echonl -icanon -isig -iexten -ixon -ixoff || { echo \"[warn] stty failed, retrying\"; sleep 1; continue; }; stdbuf -oL cat \"$DEV\"; echo \"[reconnect] Serial disconnected, retrying...\"; sleep 1; done"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Main_UI + Monitor",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Run Main_UI",
+                "Monitor Main_UI Serial"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Run Main_Motor + Monitor",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Run Main_Motor",
+                "Monitor Main_UI Serial"
+            ],
+            "problemMatcher": []
         },
         {
             "label": "Flash",
