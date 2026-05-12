@@ -72,7 +72,7 @@ static int emg_baseline = 128;
 #define MOTOR_CMD_CLOSE   2u
 
 // ===== MODE CONTROL GPIO =====
-#define PIN_MODE_ASSIST    6    // HIGH = Assistive mode
+#define PIN_MODE_ASSIST   6    // HIGH = Assistive mode
 #define PIN_MODE_REHAB    8    // HIGH = Rehab mode
 
 // 1: selected switch position pulls the GPIO LOW
@@ -83,7 +83,7 @@ static int emg_baseline = 128;
 #define SWITCH_OPEN_PIN         10  // Open the user's hand (Manual Mode only)
 #define SWITCH_CLOSE_PIN        11  // Close the user's hand (Manual Mode only)
 // #define EMG_CALIBRATE_PIN       9   // Calibrate EMG baseline (unused in current build)
-#define ROTARY_ENCODER_A_PIN    18   // Rotary encoder A (clock)
+#define ROTARY_ENCODER_A_PIN    18  // Rotary encoder A (clock)
 #define ROTARY_ENCODER_B_PIN    17  // Rotary encoder B (data)
 #define GLOVE_START_PIN         16  // Rotary encoder push button (toggle run/stop)
 #define HOMING_CALIBRATE_PIN    14  // Calibrate range of motion (open/close endpoints)
@@ -138,9 +138,11 @@ static int emg_baseline = 128;
 #define UI_ASSIST_SPEED_RAMP_TICK_MS 20u  // Assistive: ramp update period for transmitted speed
 #define UI_ASSIST_ACCEL_STEP_PCT     4u   // Assistive: speed increment per ramp tick
 #define UI_ASSIST_DECEL_STEP_PCT     2u   // Assistive: speed decrement per ramp tick
+
 #define UI_MANUAL_SPEED_RAMP_TICK_MS 20u  // Manual: ramp update period for transmitted speed
 #define UI_MANUAL_ACCEL_STEP_PCT     4u   // Manual: speed increment per ramp tick
 #define UI_MANUAL_DECEL_STEP_PCT     2u   // Manual: speed decrement per ramp tick
+
 #define UI_REHAB_SPEED_RAMP_TICK_MS  20u  // Rehab: ramp update period for transmitted speed
 #define UI_REHAB_ACCEL_STEP_PCT      4u   // Rehab: speed increment per ramp tick
 #define UI_REHAB_DECEL_STEP_PCT      2u   // Rehab: speed decrement per ramp tick

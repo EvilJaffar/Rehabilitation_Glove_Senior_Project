@@ -37,7 +37,7 @@ static const int NUM_MOTORS = 5;
 // EN/IN wiring model:
 // - EN pin gets PWM duty (speed)
 // - IN pin selects direction (CW/CCW)
-static const uint MOTOR_EN_PIN[5] = {2, 6, 10, 14, 20};
+static const uint MOTOR_EN_PIN[5] = {2, 6, 10, 22, 20};
 static const uint MOTOR_IN_PIN[5] = {3, 7, 11, 15, 21};
 
 // EN/IN direction polarity. Flip these if motor wiring reverses perceived CW/CCW.
@@ -92,6 +92,12 @@ static uint32_t rehab_speed_step_last_ms = 0u;
 static unsigned char rehab_ramped_speed_pct = 0u;
 static uint32_t rehab_pause_ms = REHAB_PAUSE_DEFAULT_MS;
 
+// Brief startup boost to overcome motor static friction from rest.
+static const uint32_t START_KICK_MS = 120u;
+static const unsigned char START_KICK_MIN_PCT = 35u;
+static bool g_motor_running_cmd[5] = {false};
+static uint32_t g_motor_kick_until_ms[5] = {0u};
+
 // ===== PWM INIT =====
 static bool slice_initialized[8] = {false};  // Track which slices have been initialized
 
@@ -123,10 +129,27 @@ static unsigned int speed_pct_to_pwm(unsigned char pct) {
     return (unsigned int)(((unsigned int)pct * PWM_TOP) / 100u);
 }
 
+static unsigned char apply_start_kick(int motor_idx, unsigned char requested_pct) {
+    if (requested_pct == 0u) return 0u;
+
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+
+    if (!g_motor_running_cmd[motor_idx]) {
+        g_motor_running_cmd[motor_idx] = true;
+        g_motor_kick_until_ms[motor_idx] = now_ms + START_KICK_MS;
+    }
+
+    if (now_ms < g_motor_kick_until_ms[motor_idx] && requested_pct < START_KICK_MIN_PCT) {
+        return START_KICK_MIN_PCT;
+    }
+    return requested_pct;
+}
+
 static void motors_drive_all(unsigned char dir_level, unsigned char speed_pct, const char* tag) {
-    unsigned int level = speed_pct_to_pwm(speed_pct);
-    printf("%s: level=%u ", tag, level);
+    printf("%s: ", tag);
     for (int i = 0; i < NUM_MOTORS; i++) {
+        unsigned char effective_pct = apply_start_kick(i, speed_pct);
+        unsigned int level = speed_pct_to_pwm(effective_pct);
         gpio_put(MOTOR_IN_PIN[i], dir_level);
 
         // Re-assert PWM function on EN pin (may have been switched to GPIO by motors_stop).
@@ -134,15 +157,19 @@ static void motors_drive_all(unsigned char dir_level, unsigned char speed_pct, c
         uint slice = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
         pwm_set_enabled(slice, true);
 
-        // Restore proper PWM wrap for problematic motors.
-        if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20) {
+        // Restore proper PWM wrap for motors that share slices with others.
+        if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20 || MOTOR_EN_PIN[i] == 22) {
             pwm_set_wrap(slice, PWM_TOP);
         }
 
         pwm_set_gpio_level(MOTOR_EN_PIN[i], level);
-        printf("M%d(GPIO%d) ", i, MOTOR_EN_PIN[i]);
+        printf("M%d(EN=%s,IN=%s,pct=%u) ",
+               i,
+               level > 0 ? "HIGH" : "LOW",
+               dir_level ? "HIGH" : "LOW",
+               (unsigned int)effective_pct);
     }
-    printf("speed=%u%%\n", (unsigned int)speed_pct);
+    printf("req=%u%%\n", (unsigned int)speed_pct);
 }
 
 // ===== MOTOR CONTROL =====
@@ -184,29 +211,36 @@ void motors_stop() {
         // Keep IN low while stopped.
         gpio_put(MOTOR_IN_PIN[i], DIR_CCW_LEVEL);
 
-        printf("M%d ", i);
+        g_motor_running_cmd[i] = false;
+        g_motor_kick_until_ms[i] = 0u;
+
+        uint en_state = gpio_get(MOTOR_EN_PIN[i]);
+        uint in_state = gpio_get(MOTOR_IN_PIN[i]);
+        printf("M%d(EN=%s,IN=%s) ", i, en_state ? "HIGH" : "LOW", in_state ? "HIGH" : "LOW");
     }
     printf("STOPPED\n");
 }
 
 // ===== PER-MOTOR SINGLE DRIVE (used by Assistive mode for independent finger control) =====
 static void motor_forward_single(int i) {
-    unsigned int level = speed_pct_to_pwm(g_speed_pct);
+    unsigned char effective_pct = apply_start_kick(i, g_speed_pct);
+    unsigned int level = speed_pct_to_pwm(effective_pct);
     gpio_put(MOTOR_IN_PIN[i], DIR_CW_LEVEL);
     gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_PWM);
     uint slice = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
     pwm_set_enabled(slice, true);
-    if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20) pwm_set_wrap(slice, PWM_TOP);
+    if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20 || MOTOR_EN_PIN[i] == 22) pwm_set_wrap(slice, PWM_TOP);
     pwm_set_gpio_level(MOTOR_EN_PIN[i], level);
 }
 
 static void motor_reverse_single(int i) {
-    unsigned int level = speed_pct_to_pwm(g_speed_pct);
+    unsigned char effective_pct = apply_start_kick(i, g_speed_pct);
+    unsigned int level = speed_pct_to_pwm(effective_pct);
     gpio_put(MOTOR_IN_PIN[i], DIR_CCW_LEVEL);
     gpio_set_function(MOTOR_EN_PIN[i], GPIO_FUNC_PWM);
     uint slice = pwm_gpio_to_slice_num(MOTOR_EN_PIN[i]);
     pwm_set_enabled(slice, true);
-    if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20) pwm_set_wrap(slice, PWM_TOP);
+    if (MOTOR_EN_PIN[i] == 6 || MOTOR_EN_PIN[i] == 20 || MOTOR_EN_PIN[i] == 22) pwm_set_wrap(slice, PWM_TOP);
     pwm_set_gpio_level(MOTOR_EN_PIN[i], level);
 }
 
@@ -219,6 +253,8 @@ static void motor_stop_single(int i) {
     gpio_set_dir(MOTOR_EN_PIN[i], GPIO_OUT);
     gpio_put(MOTOR_EN_PIN[i], 0);
     gpio_put(MOTOR_IN_PIN[i], DIR_CCW_LEVEL);
+    g_motor_running_cmd[i] = false;
+    g_motor_kick_until_ms[i] = 0u;
 }
 
 // ===== ENCODER ISR =====
